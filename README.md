@@ -1,5 +1,7 @@
 # txio
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
+
 **One terminal. Every chain.**
 
 txio is a CLI for developers who'd rather not install six different blockchain tools. One binary covers Sui, Ethereum, Solana, Aptos, and Soroban — same flags, same commands, predictable output.
@@ -129,3 +131,15 @@ txio login          # interactive login, stores JWT in ~/.txio/token
 txio profile        # view, update email, change password
 txio db list-users  # admin only
 ```
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for bug reports, enhancement
+suggestions, and the PR process. Please also read our
+[Code of Conduct](./CODE_OF_CONDUCT.md).
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
