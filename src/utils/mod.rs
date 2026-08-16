@@ -138,7 +138,28 @@ pub fn save_config(key: &str, value: &str) -> Result<()> {
         key.to_string(),
         serde_json::Value::String(value.to_string()),
     );
-    fs::write(path, serde_json::to_string_pretty(&map)?)?;
+    let serialized = serde_json::to_string_pretty(&map)?;
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .open(&path)?;
+
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.set_len(0)?;
+        file.write_all(serialized.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&path, serialized)?;
+    }
+
     Ok(())
 }
 
@@ -443,6 +464,78 @@ mod tests {
         // Verify content is the new token
         let content = fs::read_to_string(&token_path).unwrap();
         assert_eq!(content, "new_token", "save_token must replace with new token content");
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_creates_secure_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("config_mode");
+        let old_home = std::env::var_os("HOME");
+
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        save_config("rpc_url", "https://custom.rpc.node/api_key_secret").unwrap();
+
+        let config_dir = temp_home.join(".txio");
+        let config_path = config_dir.join("config.json");
+
+        let dir_mode = fs::metadata(&config_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "config dir must have mode 0o700");
+
+        let file_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "config.json file must have mode 0o600");
+
+        let val = get_config("rpc_url").unwrap();
+        assert_eq!(val, Some("https://custom.rpc.node/api_key_secret".to_string()));
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_secures_existing_insecure_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("config_secure_existing");
+        let old_home = std::env::var_os("HOME");
+
+        let config_dir = temp_home.join(".txio");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let config_path = config_dir.join("config.json");
+        fs::write(&config_path, "{\"existing\":\"val\"}").unwrap();
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let initial_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(initial_mode, 0o644, "test setup: config.json should start with 0o644");
+
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        save_config("new_key", "secret123").unwrap();
+
+        let final_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(final_mode, 0o600, "save_config must secure existing config.json file to 0o600");
+
+        let existing_val = get_config("existing").unwrap();
+        assert_eq!(existing_val, Some("val".to_string()));
+        let new_val = get_config("new_key").unwrap();
+        assert_eq!(new_val, Some("secret123".to_string()));
 
         match old_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
