@@ -626,7 +626,25 @@ impl CommandHandler {
                         chain.green()
                     );
                 }
-                let result = adapter.get_history(&address, limit).await?;
+                let resolved_address = if let Some(addr) = adapter.resolve_name(&address).await? {
+                    println!(
+                        "{} Resolved {} to {}\n",
+                        "🔍".blue(),
+                        address.yellow(),
+                        addr.cyan()
+                    );
+                    addr
+                } else {
+                    if address.ends_with(".sui") || address.ends_with(".eth") {
+                        println!(
+                            "{} {} could not be resolved! Proceeding with raw input...\n",
+                            "⚠️".yellow(),
+                            address.yellow()
+                        );
+                    }
+                    address
+                };
+                let result = adapter.get_history(&resolved_address, limit).await?;
                 Self::print_value(&result, pretty)?;
             }
             ChainCommand::Gas => {
