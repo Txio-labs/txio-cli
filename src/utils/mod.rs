@@ -2,9 +2,6 @@ use anyhow::{Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
 /// Load environment overrides for the CLI.
 ///
 /// Security: unlike the previous `dotenvy::dotenv()` call, this does NOT search
@@ -57,9 +54,18 @@ pub fn get_config_dir() -> PathBuf {
     let mut path = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
     path.push(".txio");
     if !path.exists() {
-        fs::create_dir_all(&path).ok();
         #[cfg(unix)]
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o700));
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            builder.mode(0o700);
+            let _ = builder.create(&path);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fs::create_dir_all(&path);
+        }
     }
     path
 }
@@ -80,9 +86,27 @@ pub fn get_current_chain() -> Option<String> {
 pub fn save_token(token: &str) -> Result<()> {
     let mut path = get_config_dir();
     path.push("token");
-    fs::write(&path, token)?;
+
     #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .open(&path)?;
+
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.set_len(0)?;
+        file.write_all(token.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&path, token)?;
+    }
+
     Ok(())
 }
 
@@ -323,5 +347,106 @@ mod tests {
         assert!(!should_warn_unloaded_cwd_env(true, &present));
         // No warn: no ./.env exists.
         assert!(!should_warn_unloaded_cwd_env(false, &absent));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_dir_created_with_mode_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("config_dir_mode");
+        let old_home = std::env::var_os("HOME");
+
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        let config_dir = get_config_dir();
+
+        let mode = fs::metadata(&config_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "config dir must have mode 0o700");
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_token_creates_secure_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("token_mode");
+        let old_home = std::env::var_os("HOME");
+
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        let test_token = "test_jwt_token_content";
+        save_token(test_token).unwrap();
+
+        let config_dir = temp_home.join(".txio");
+        let token_path = config_dir.join("token");
+
+        let dir_mode = fs::metadata(&config_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "config dir must have mode 0o700");
+
+        let file_mode = fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "token file must have mode 0o600");
+
+        let content = fs::read_to_string(&token_path).unwrap();
+        assert_eq!(content, test_token, "token file must contain exact token");
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_token_secures_existing_insecure_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("token_secure_existing");
+        let old_home = std::env::var_os("HOME");
+
+        // Create .txio directory with insecure permissions
+        let config_dir = temp_home.join(".txio");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        // Create token file with insecure permissions (0644) and old content
+        let token_path = config_dir.join("token");
+        fs::write(&token_path, "old_token").unwrap();
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        // Verify it's initially insecure
+        let initial_mode = fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(initial_mode, 0o644, "test setup: token should start with 0o644");
+
+        // Set HOME and call save_token
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        save_token("new_token").unwrap();
+
+        // Verify permissions are now 0600
+        let final_mode = fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(final_mode, 0o600, "save_token must secure existing token file to 0o600");
+
+        // Verify content is the new token
+        let content = fs::read_to_string(&token_path).unwrap();
+        assert_eq!(content, "new_token", "save_token must replace with new token content");
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
     }
 }
