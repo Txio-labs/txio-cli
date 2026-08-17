@@ -83,6 +83,27 @@ pub fn get_current_chain() -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
 
+pub fn save_current_network(network: &str) -> Result<()> {
+    write_network_file(&get_config_dir(), network)
+}
+
+pub fn get_current_network() -> Option<String> {
+    read_network_file(&get_config_dir())
+}
+
+// Dir-parameterized cores so persistence can be tested against a temp
+// directory instead of the real config dir.
+pub(crate) fn write_network_file(dir: &std::path::Path, network: &str) -> Result<()> {
+    fs::write(dir.join("current_network"), network)?;
+    Ok(())
+}
+
+pub(crate) fn read_network_file(dir: &std::path::Path) -> Option<String> {
+    fs::read_to_string(dir.join("current_network"))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
 pub fn save_token(token: &str) -> Result<()> {
     let mut path = get_config_dir();
     path.push("token");
@@ -541,5 +562,33 @@ mod tests {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+    }
+
+    // ── network persistence ────────────────────────────────────────────────
+
+    #[test]
+    fn network_file_round_trips() {
+        let dir = unique_dir("netround");
+        write_network_file(&dir, "testnet").unwrap();
+        assert_eq!(read_network_file(&dir).as_deref(), Some("testnet"));
+    }
+
+    #[test]
+    fn network_file_is_trimmed_on_read() {
+        let dir = unique_dir("nettrim");
+        write_network_file(&dir, "  devnet 
+
+").unwrap();
+        assert_eq!(read_network_file(&dir).as_deref(), Some("devnet"));
+    }
+
+    #[test]
+    fn missing_or_corrupt_network_file_reads_as_none() {
+        let dir = unique_dir("netmissing");
+        assert_eq!(read_network_file(&dir), None);
+        // A directory where the file should be is just as absent to the reader.
+        let nested = dir.join("current_network");
+        fs::create_dir_all(&nested).unwrap();
+        assert_eq!(read_network_file(&dir), None);
     }
 }
