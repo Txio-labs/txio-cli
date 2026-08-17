@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// makes it win over the trusted default, while real process env — set before
 /// either loader runs — always wins over both.
 pub fn load_environment(explicit_env_file: Option<&Path>) -> Result<()> {
-    let mut trusted = get_config_dir();
+    let mut trusted = get_config_dir()?;
     trusted.push(".env");
     let cwd_env = Path::new(".env");
     load_env_files(explicit_env_file, &trusted, cwd_env)
@@ -50,8 +50,10 @@ fn should_warn_unloaded_cwd_env(explicit_provided: bool, cwd_env: &Path) -> bool
     !explicit_provided && cwd_env.exists()
 }
 
-pub fn get_config_dir() -> PathBuf {
-    let mut path = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
+pub fn get_config_dir() -> Result<PathBuf> {
+    let mut path = dirs_next::home_dir()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| anyhow!("Could not determine home directory (checked $HOME). Set the HOME environment variable and try again."))?;
     path.push(".txio");
     if !path.exists() {
         #[cfg(unix)]
@@ -67,24 +69,24 @@ pub fn get_config_dir() -> PathBuf {
             let _ = fs::create_dir_all(&path);
         }
     }
-    path
+    Ok(path)
 }
 
 pub fn save_current_chain(chain: &str) -> Result<()> {
-    let mut path = get_config_dir();
+    let mut path = get_config_dir()?;
     path.push("current_chain");
     fs::write(path, chain)?;
     Ok(())
 }
 
-pub fn get_current_chain() -> Option<String> {
-    let mut path = get_config_dir();
+pub fn get_current_chain() -> Result<Option<String>> {
+    let mut path = get_config_dir()?;
     path.push("current_chain");
-    fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+    Ok(fs::read_to_string(path).ok().map(|s| s.trim().to_string()))
 }
 
 pub fn save_token(token: &str) -> Result<()> {
-    let mut path = get_config_dir();
+    let mut path = get_config_dir()?;
     path.push("token");
 
     #[cfg(unix)]
@@ -110,14 +112,14 @@ pub fn save_token(token: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn get_token() -> Option<String> {
-    let mut path = get_config_dir();
+pub fn get_token() -> Result<Option<String>> {
+    let mut path = get_config_dir()?;
     path.push("token");
-    fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+    Ok(fs::read_to_string(path).ok().map(|s| s.trim().to_string()))
 }
 
 pub fn remove_token() -> Result<()> {
-    let mut path = get_config_dir();
+    let mut path = get_config_dir()?;
     path.push("token");
     if path.exists() {
         fs::remove_file(path)?;
@@ -126,7 +128,7 @@ pub fn remove_token() -> Result<()> {
 }
 
 pub fn save_config(key: &str, value: &str) -> Result<()> {
-    let mut path = get_config_dir();
+    let mut path = get_config_dir()?;
     path.push("config.json");
     let mut map: serde_json::Map<String, serde_json::Value> = if path.exists() {
         let content = fs::read_to_string(&path)?;
@@ -143,7 +145,7 @@ pub fn save_config(key: &str, value: &str) -> Result<()> {
 }
 
 pub fn get_config(key: &str) -> Result<Option<String>> {
-    let mut path = get_config_dir();
+    let mut path = get_config_dir()?;
     path.push("config.json");
     if !path.exists() {
         return Ok(None);
@@ -155,7 +157,7 @@ pub fn get_config(key: &str) -> Result<Option<String>> {
 }
 
 pub fn list_config() -> Result<Vec<(String, String)>> {
-    let mut path = get_config_dir();
+    let mut path = get_config_dir()?;
     path.push("config.json");
     if !path.exists() {
         return Ok(vec![]);
@@ -170,7 +172,7 @@ pub fn list_config() -> Result<Vec<(String, String)>> {
 }
 
 pub fn remove_config(key: &str) -> Result<()> {
-    let mut path = get_config_dir();
+    let mut path = get_config_dir()?;
     path.push("config.json");
     if !path.exists() {
         return Ok(());
@@ -362,7 +364,7 @@ mod tests {
             std::env::set_var("HOME", &temp_home);
         }
 
-        let config_dir = get_config_dir();
+        let config_dir = get_config_dir().unwrap();
 
         let mode = fs::metadata(&config_dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "config dir must have mode 0o700");
@@ -444,6 +446,24 @@ mod tests {
         let content = fs::read_to_string(&token_path).unwrap();
         assert_eq!(content, "new_token", "save_token must replace with new token content");
 
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn get_config_dir_fails_when_home_unset() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let old_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        
+        let result = get_config_dir();
+        assert!(result.is_err(), "get_config_dir should fail when HOME is unset");
+        assert!(result.unwrap_err().to_string().contains("Could not determine home directory"));
+        
         match old_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
             None => unsafe { std::env::remove_var("HOME") },
