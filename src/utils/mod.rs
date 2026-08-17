@@ -83,6 +83,23 @@ pub fn get_current_chain() -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
 
+pub fn save_current_network(network: &str) -> Result<()> {
+    let mut path = get_config_dir();
+    path.push("current_network");
+    fs::write(path, network)?;
+    Ok(())
+}
+
+pub fn save_network(network: &str) -> Result<()> {
+    save_current_network(network)
+}
+
+pub fn get_current_network() -> Option<String> {
+    let mut path = get_config_dir();
+    path.push("current_network");
+    fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+}
+
 pub fn save_token(token: &str) -> Result<()> {
     let mut path = get_config_dir();
     path.push("token");
@@ -443,6 +460,30 @@ mod tests {
         // Verify content is the new token
         let content = fs::read_to_string(&token_path).unwrap();
         assert_eq!(content, "new_token", "save_token must replace with new token content");
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn save_and_get_current_network_round_trip() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("network_persist");
+        let old_home = std::env::var_os("HOME");
+
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        assert_eq!(get_current_network(), None);
+
+        save_current_network("testnet").unwrap();
+        assert_eq!(get_current_network(), Some("testnet".to_string()));
+
+        save_network("devnet").unwrap();
+        assert_eq!(get_current_network(), Some("devnet".to_string()));
 
         match old_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },

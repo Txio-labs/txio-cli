@@ -1,12 +1,13 @@
 use crate::chains::factory::ChainFactory;
 use crate::chains::traits::ChainAdapter;
 use crate::cli::format::format_units_fixed;
-use crate::cli::parser::{ChainCommand, Cli, Commands, ConfigAction, DbAction};
+use crate::cli::parser::{ChainCommand, Cli, Commands, ConfigAction, DbAction, Network};
 use crate::cli::ui;
 use crate::utils;
 use anyhow::{Result, anyhow};
 use colored::*;
 use serde_json::Value;
+use std::str::FromStr;
 use std::sync::Arc;
 use txio_api::dtos::admin_dtos::{
     AdminLogEntry, AdminStatsResponse, AdminUsersResponse, RpcLogRequest,
@@ -49,7 +50,27 @@ fn truncate_utf8_for_display(input: &str, prefix_len: usize, suffix_len: usize) 
 pub struct CommandHandler;
 
 impl CommandHandler {
+    /// Resolves the effective network:
+    /// 1. Explicit CLI invocation flag (`--network <network>`), if provided.
+    /// 2. Persisted network selection (`~/.txio/current_network`), if valid.
+    /// 3. Default fallback (`Network::Mainnet`).
+    pub fn resolve_network(explicit_network: Option<Network>) -> Network {
+        if let Some(net) = explicit_network {
+            return net;
+        }
+
+        if let Some(saved) = utils::get_current_network() {
+            if let Ok(net) = Network::from_str(&saved) {
+                return net;
+            }
+        }
+
+        Network::Mainnet
+    }
+
     pub async fn handle(cli: Cli) -> Result<()> {
+        let effective_network = Self::resolve_network(cli.network);
+
         match cli.command {
             Commands::Chains => {
                 println!("{}", "Supported Blockchains:".bold().cyan());
@@ -57,21 +78,36 @@ impl CommandHandler {
                     println!("  - {}", chain.green());
                 }
             }
-            Commands::Switch { chain } => {
-                if ChainFactory::list_chains().contains(&chain.to_lowercase().as_str()) {
-                    utils::save_current_chain(&chain.to_lowercase())?;
-                    ui::print_success(&format!(
-                        "Switched default chain to {}",
-                        chain.bold().cyan()
-                    ));
-                } else {
-                    let msg = format!("Unknown chain '{chain}'");
-                    let suggestion = ChainFactory::suggest_chain(&chain);
-                    if let Some(s) = suggestion {
-                        ui::print_error(&format!("{msg} \n\nDid you mean:\n  {}", s.green()));
+            Commands::Switch { chain, network } => {
+                if chain.is_none() && network.is_none() {
+                    ui::print_error("Please specify a chain and/or --network to switch.");
+                    return Ok(());
+                }
+
+                if let Some(chain_name) = chain {
+                    if ChainFactory::list_chains().contains(&chain_name.to_lowercase().as_str()) {
+                        utils::save_current_chain(&chain_name.to_lowercase())?;
+                        ui::print_success(&format!(
+                            "Switched default chain to {}",
+                            chain_name.bold().cyan()
+                        ));
                     } else {
-                        ui::print_error(&msg);
+                        let msg = format!("Unknown chain '{chain_name}'");
+                        let suggestion = ChainFactory::suggest_chain(&chain_name);
+                        if let Some(s) = suggestion {
+                            ui::print_error(&format!("{msg} \n\nDid you mean:\n  {}", s.green()));
+                        } else {
+                            ui::print_error(&msg);
+                        }
                     }
+                }
+
+                if let Some(net) = network {
+                    utils::save_current_network(&net.to_string())?;
+                    ui::print_success(&format!(
+                        "Switched default network to {}",
+                        net.to_string().bold().yellow()
+                    ));
                 }
             }
             Commands::Login => {
@@ -93,7 +129,7 @@ impl CommandHandler {
                 println!(
                     "  {} Network:        {}",
                     "»".dimmed(),
-                    cli.network.to_string().yellow()
+                    effective_network.to_string().yellow()
                 );
                 println!(
                     "  {} Authenticated:  {}",
@@ -105,7 +141,7 @@ impl CommandHandler {
                     }
                 );
                 if let Ok(adapter) =
-                    ChainFactory::get_adapter(&chain, cli.rpc_url.clone(), cli.network.clone())
+                    ChainFactory::get_adapter(&chain, cli.rpc_url.clone(), effective_network.clone())
                 {
                     let rpc = cli.rpc_url.as_deref().unwrap_or(adapter.default_rpc());
                     let healthy = adapter.get_gas_price().await.is_ok();
@@ -148,30 +184,30 @@ impl CommandHandler {
             },
             Commands::Sui { command } => {
                 let adapter =
-                    ChainFactory::get_adapter("sui", cli.rpc_url.clone(), cli.network.clone())?;
+                    ChainFactory::get_adapter("sui", cli.rpc_url.clone(), effective_network)?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Ethereum { command } => {
                 let adapter = ChainFactory::get_adapter(
                     "ethereum",
                     cli.rpc_url.clone(),
-                    cli.network.clone(),
+                    effective_network,
                 )?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Solana { command } => {
                 let adapter =
-                    ChainFactory::get_adapter("solana", cli.rpc_url.clone(), cli.network.clone())?;
+                    ChainFactory::get_adapter("solana", cli.rpc_url.clone(), effective_network)?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Aptos { command } => {
                 let adapter =
-                    ChainFactory::get_adapter("aptos", cli.rpc_url.clone(), cli.network.clone())?;
+                    ChainFactory::get_adapter("aptos", cli.rpc_url.clone(), effective_network)?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Soroban { command } => {
                 let adapter =
-                    ChainFactory::get_adapter("soroban", cli.rpc_url.clone(), cli.network.clone())?;
+                    ChainFactory::get_adapter("soroban", cli.rpc_url.clone(), effective_network)?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Db { action } => {
@@ -728,7 +764,26 @@ impl CommandHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_utf8_for_display;
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let mut d = std::env::temp_dir();
+        d.push(format!(
+            "txio_handler_test_{}_{}_{}",
+            tag,
+            std::process::id(),
+            n
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
 
     #[test]
     fn truncates_multi_byte_utf8_input_without_panicking() {
@@ -743,5 +798,34 @@ mod tests {
     fn leaves_short_strings_unchanged() {
         let input = "0x2::sui::SUI";
         assert_eq!(truncate_utf8_for_display(input, 10, 10), input);
+    }
+
+    #[test]
+    fn resolves_network_with_precedence() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("res_net");
+        let old_home = std::env::var_os("HOME");
+
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        // 1. First run, nothing persisted -> Mainnet
+        assert_eq!(CommandHandler::resolve_network(None), Network::Mainnet);
+
+        // 2. Persisted network exists -> picks up persisted network
+        utils::save_current_network("testnet").unwrap();
+        assert_eq!(CommandHandler::resolve_network(None), Network::Testnet);
+
+        // 3. Explicit CLI flag -> overrides persisted network
+        assert_eq!(
+            CommandHandler::resolve_network(Some(Network::Devnet)),
+            Network::Devnet
+        );
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
     }
 }
