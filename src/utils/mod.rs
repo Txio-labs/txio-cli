@@ -83,10 +83,7 @@ pub fn get_current_chain() -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
 
-pub fn save_token(token: &str) -> Result<()> {
-    let mut path = get_config_dir();
-    path.push("token");
-
+fn write_file_secure(path: &Path, contents: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -95,19 +92,25 @@ pub fn save_token(token: &str) -> Result<()> {
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o600)
-            .open(&path)?;
+            .open(path)?;
 
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.set_len(0)?;
-        file.write_all(token.as_bytes())?;
+        file.write_all(contents.as_bytes())?;
     }
     #[cfg(not(unix))]
     {
-        fs::write(&path, token)?;
+        fs::write(path, contents)?;
     }
 
     Ok(())
+}
+
+pub fn save_token(token: &str) -> Result<()> {
+    let mut path = get_config_dir();
+    path.push("token");
+    write_file_secure(&path, token)
 }
 
 pub fn get_token() -> Option<String> {
@@ -138,8 +141,7 @@ pub fn save_config(key: &str, value: &str) -> Result<()> {
         key.to_string(),
         serde_json::Value::String(value.to_string()),
     );
-    fs::write(path, serde_json::to_string_pretty(&map)?)?;
-    Ok(())
+    write_file_secure(&path, &serde_json::to_string_pretty(&map)?)
 }
 
 pub fn get_config(key: &str) -> Result<Option<String>> {
@@ -443,6 +445,73 @@ mod tests {
         // Verify content is the new token
         let content = fs::read_to_string(&token_path).unwrap();
         assert_eq!(content, "new_token", "save_token must replace with new token content");
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_creates_secure_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("config_mode");
+        let old_home = std::env::var_os("HOME");
+
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        save_config("test_key", "test_val").unwrap();
+
+        let config_dir = temp_home.join(".txio");
+        let config_path = config_dir.join("config.json");
+
+        let file_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "config file must have mode 0o600");
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("test_val"));
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_secures_existing_insecure_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("config_secure_existing");
+        let old_home = std::env::var_os("HOME");
+
+        let config_dir = temp_home.join(".txio");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let config_path = config_dir.join("config.json");
+        fs::write(&config_path, "{}").unwrap();
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let initial_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(initial_mode, 0o644, "test setup: config should start with 0o644");
+
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        save_config("new_key", "new_val").unwrap();
+
+        let final_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(final_mode, 0o600, "save_config must secure existing file to 0o600");
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("new_val"));
 
         match old_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
