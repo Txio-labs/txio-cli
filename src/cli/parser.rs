@@ -10,6 +10,21 @@ pub enum Network {
     Localnet,
 }
 
+impl Network {
+    /// Parse a persisted network name back into a `Network`, accepting the
+    /// same spellings the CLI flag does. Anything unrecognized is `None` so
+    /// callers fall back to the default instead of guessing.
+    pub fn from_config_str(value: &str) -> Option<Network> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "mainnet" => Some(Network::Mainnet),
+            "testnet" => Some(Network::Testnet),
+            "devnet" => Some(Network::Devnet),
+            "localnet" => Some(Network::Localnet),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for Network {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
@@ -42,9 +57,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub rpc_url: Option<String>,
 
-    /// Select the network to use
-    #[arg(short, long, global = true, value_enum, default_value_t = Network::Mainnet)]
-    pub network: Network,
+    /// Select the network to use. When omitted, the last network chosen
+    /// via `switch --network` is used; with no persisted choice this
+    /// defaults to Mainnet.
+    #[arg(short, long, global = true, value_enum)]
+    pub network: Option<Network>,
 
     /// Load environment overrides from an explicit file (opt-in; no upward search).
     /// Without this flag, a `./.env` in the current directory is NOT loaded.
@@ -58,7 +75,11 @@ pub enum Commands {
     Chains,
 
     /// Switch the default chain
-    Switch { chain: String },
+    Switch {
+        /// Also switch the persisted network alongside the chain
+        #[arg(long, value_enum)]
+        network: Option<Network>,
+        chain: String },
 
     /// Login to your txio account
     Login,
