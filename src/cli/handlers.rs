@@ -48,8 +48,23 @@ fn truncate_utf8_for_display(input: &str, prefix_len: usize, suffix_len: usize) 
 
 pub struct CommandHandler;
 
+/// Decide which network a command runs against: an explicit `--network`
+/// flag always wins, then the last choice persisted by `switch --network`,
+/// and finally the safe Mainnet default. Kept pure so the precedence is
+/// unit-testable without touching the real config directory.
+fn resolve_network(flag: Option<crate::cli::parser::Network>, persisted: Option<String>) -> crate::cli::parser::Network {
+    use crate::cli::parser::Network;
+    flag.or_else(|| {
+        persisted
+            .as_deref()
+            .and_then(Network::from_config_str)
+    })
+    .unwrap_or_default()
+}
+
 impl CommandHandler {
     pub async fn handle(cli: Cli) -> Result<()> {
+        let network = resolve_network(cli.network.clone(), utils::get_current_network());
         match cli.command {
             Commands::Chains => {
                 println!("{}", "Supported Blockchains:".bold().cyan());
@@ -57,9 +72,12 @@ impl CommandHandler {
                     println!("  - {}", chain.green());
                 }
             }
-            Commands::Switch { chain } => {
+            Commands::Switch { chain, network: net_flag } => {
                 if ChainFactory::list_chains().contains(&chain.to_lowercase().as_str()) {
                     utils::save_current_chain(&chain.to_lowercase())?;
+                    if let Some(n) = net_flag {
+                        utils::save_current_network(&n.to_string())?;
+                    }
                     ui::print_success(&format!(
                         "Switched default chain to {}",
                         chain.bold().cyan()
@@ -93,7 +111,7 @@ impl CommandHandler {
                 println!(
                     "  {} Network:        {}",
                     "»".dimmed(),
-                    cli.network.to_string().yellow()
+                    network.to_string().yellow()
                 );
                 println!(
                     "  {} Authenticated:  {}",
@@ -105,7 +123,7 @@ impl CommandHandler {
                     }
                 );
                 if let Ok(adapter) =
-                    ChainFactory::get_adapter(&chain, cli.rpc_url.clone(), cli.network.clone())
+                    ChainFactory::get_adapter(&chain, cli.rpc_url.clone(), network.clone())
                 {
                     let rpc = cli.rpc_url.as_deref().unwrap_or(adapter.default_rpc());
                     let healthy = adapter.get_gas_price().await.is_ok();
@@ -148,30 +166,30 @@ impl CommandHandler {
             },
             Commands::Sui { command } => {
                 let adapter =
-                    ChainFactory::get_adapter("sui", cli.rpc_url.clone(), cli.network.clone())?;
+                    ChainFactory::get_adapter("sui", cli.rpc_url.clone(), network.clone())?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Ethereum { command } => {
                 let adapter = ChainFactory::get_adapter(
                     "ethereum",
                     cli.rpc_url.clone(),
-                    cli.network.clone(),
+                    network.clone(),
                 )?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Solana { command } => {
                 let adapter =
-                    ChainFactory::get_adapter("solana", cli.rpc_url.clone(), cli.network.clone())?;
+                    ChainFactory::get_adapter("solana", cli.rpc_url.clone(), network.clone())?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Aptos { command } => {
                 let adapter =
-                    ChainFactory::get_adapter("aptos", cli.rpc_url.clone(), cli.network.clone())?;
+                    ChainFactory::get_adapter("aptos", cli.rpc_url.clone(), network.clone())?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Soroban { command } => {
                 let adapter =
-                    ChainFactory::get_adapter("soroban", cli.rpc_url.clone(), cli.network.clone())?;
+                    ChainFactory::get_adapter("soroban", cli.rpc_url.clone(), network.clone())?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Db { action } => {
@@ -729,6 +747,32 @@ impl CommandHandler {
 #[cfg(test)]
 mod tests {
     use super::truncate_utf8_for_display;
+    use super::resolve_network;
+    use crate::cli::parser::Network;
+
+    #[test]
+    fn explicit_flag_beats_persisted_and_default() {
+        let resolved = resolve_network(Some(Network::Testnet), Some("mainnet".to_string()));
+        assert_eq!(resolved, Network::Testnet);
+    }
+
+    #[test]
+    fn persisted_network_used_when_no_flag() {
+        let resolved = resolve_network(None, Some("devnet".to_string()));
+        assert_eq!(resolved, Network::Devnet);
+    }
+
+    #[test]
+    fn unrecognized_persisted_value_falls_back_to_mainnet() {
+        let resolved = resolve_network(None, Some("garbage".to_string()));
+        assert_eq!(resolved, Network::Mainnet);
+    }
+
+    #[test]
+    fn nothing_settled_defaults_to_mainnet() {
+        let resolved = resolve_network(None, None);
+        assert_eq!(resolved, Network::Mainnet);
+    }
 
     #[test]
     fn truncates_multi_byte_utf8_input_without_panicking() {
