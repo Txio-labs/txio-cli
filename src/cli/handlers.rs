@@ -64,7 +64,7 @@ fn resolve_network(flag: Option<crate::cli::parser::Network>, persisted: Option<
 
 impl CommandHandler {
     pub async fn handle(cli: Cli) -> Result<()> {
-        let network = resolve_network(cli.network.clone(), utils::get_current_network());
+        let network = resolve_network(cli.network.clone(), utils::get_current_network()?);
         match cli.command {
             Commands::Chains => {
                 println!("{}", "Supported Blockchains:".bold().cyan());
@@ -112,8 +112,8 @@ impl CommandHandler {
                 ui::print_success("Logged out successfully.");
             }
             Commands::Status => {
-                let chain = utils::get_current_chain().unwrap_or_else(|| "sui".to_string());
-                let logged_in = utils::get_token().is_some();
+                let chain = utils::get_current_chain()?.unwrap_or_else(|| "sui".to_string());
+                let logged_in = utils::get_token()?.is_some();
                 println!("{}", "─── txio Status ───".bold().cyan());
                 println!(
                     "  {} Default chain:  {}",
@@ -241,7 +241,7 @@ impl CommandHandler {
     }
 
     async fn handle_db_command(action: DbAction) -> Result<()> {
-        let token = match utils::get_token() {
+        let token = match utils::get_token()? {
             Some(token) => token,
             None => {
                 ui::print_error(&format!(
@@ -474,7 +474,7 @@ impl CommandHandler {
                 // attributes the log to the authenticated user itself, so a
                 // failure here (offline, logged out, server unreachable)
                 // must never block returning the RPC result to the user.
-                if let Some(token) = utils::get_token() {
+                if let Some(token) = utils::get_token()? {
                     let log_request = RpcLogRequest {
                         method: method.clone(),
                         params: params_val,
@@ -857,20 +857,20 @@ mod tests {
 
         // 1. First run, nothing persisted -> Mainnet
         assert_eq!(
-            resolve_network(None, utils::get_current_network()),
+            resolve_network(None, utils::get_current_network().unwrap()),
             Network::Mainnet
         );
 
         // 2. Persisted network exists -> picks up persisted network
         utils::save_current_network("testnet").unwrap();
         assert_eq!(
-            resolve_network(None, utils::get_current_network()),
+            resolve_network(None, utils::get_current_network().unwrap()),
             Network::Testnet
         );
 
         // 3. Explicit CLI flag -> overrides persisted network
         assert_eq!(
-            resolve_network(Some(Network::Devnet), utils::get_current_network()),
+            resolve_network(Some(Network::Devnet), utils::get_current_network().unwrap()),
             Network::Devnet
         );
 
