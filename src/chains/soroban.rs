@@ -10,6 +10,7 @@ pub struct SorobanAdapter {
     client: Client,
     rpc_url: String,
     network: Network,
+    verbose: bool,
 }
 
 impl SorobanAdapter {
@@ -45,7 +46,14 @@ impl SorobanAdapter {
                 .unwrap_or_else(|_| Client::new()),
             rpc_url: url,
             network,
+            verbose: false,
         }
+    }
+
+    /// Enable verbose retry logging for this adapter's RPC calls.
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
     }
 }
 
@@ -67,14 +75,8 @@ impl ChainAdapter for SorobanAdapter {
             "params": params
         });
 
-        let response = self
-            .client
-            .post(&self.rpc_url)
-            .json(&payload)
-            .send()
-            .await?;
-
-        let body: Value = response.json().await?;
+        let body: Value =
+            crate::rpc::post_json(&self.client, &self.rpc_url, &payload, self.verbose).await?;
         if let Some(error) = body.get("error") {
             let msg = error
                 .get("message")
@@ -91,7 +93,7 @@ impl ChainAdapter for SorobanAdapter {
         let address = validate_soroban_address(address)?;
         let horizon = self.horizon_url()?;
         let url = build_url(horizon, &["accounts", &address])?;
-        Ok(self.client.get(url).send().await?.json().await?)
+        crate::rpc::get_json(&self.client, url.as_str(), self.verbose).await
     }
 
     async fn get_transaction(&self, hash: &str) -> Result<Value> {
@@ -117,7 +119,7 @@ impl ChainAdapter for SorobanAdapter {
         let address = validate_soroban_address(address)?;
         let horizon = self.horizon_url()?;
         let url = build_url(horizon, &["accounts", &address])?;
-        Ok(self.client.get(url).send().await?.json().await?)
+        crate::rpc::get_json(&self.client, url.as_str(), self.verbose).await
     }
 
     async fn get_history(&self, address: &str, limit: u32) -> Result<Value> {
@@ -128,7 +130,7 @@ impl ChainAdapter for SorobanAdapter {
             &["accounts", &address, "transactions"],
             &[("limit", limit.to_string()), ("order", "desc".to_string())],
         )?;
-        Ok(self.client.get(url).send().await?.json().await?)
+        crate::rpc::get_json(&self.client, url.as_str(), self.verbose).await
     }
 }
 
@@ -205,5 +207,22 @@ mod tests {
             "https://horizon.stellar.org"
         );
         assert_eq!(adapter.rpc_url, "https://custom-soroban-rpc.example.com");
+    }
+
+    #[tokio::test]
+    async fn retries_transient_429_before_succeeding() {
+        let addr = crate::rpc::test_support::serve(vec![
+            crate::rpc::test_support::MockResponse::json(429, "{}"),
+            crate::rpc::test_support::MockResponse::json(
+                200,
+                r#"{"jsonrpc":"2.0","id":1,"result":{"sequence":1}}"#,
+            ),
+        ])
+        .await;
+
+        let adapter =
+            SorobanAdapter::with_rpc(Some(format!("http://{addr}")), Network::Localnet);
+        let result = adapter.call_rpc("getLatestLedger", json!({})).await.unwrap();
+        assert_eq!(result, json!({"sequence": 1}));
     }
 }

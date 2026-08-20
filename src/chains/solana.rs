@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 pub struct SolanaAdapter {
     client: Client,
     rpc_url: String,
+    verbose: bool,
 }
 
 impl SolanaAdapter {
@@ -31,7 +32,14 @@ impl SolanaAdapter {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             rpc_url: url,
+            verbose: false,
         }
+    }
+
+    /// Enable verbose retry logging for this adapter's RPC calls.
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
     }
 }
 
@@ -53,14 +61,8 @@ impl ChainAdapter for SolanaAdapter {
             "params": params
         });
 
-        let response = self
-            .client
-            .post(&self.rpc_url)
-            .json(&payload)
-            .send()
-            .await?;
-
-        let body: Value = response.json().await?;
+        let body: Value =
+            crate::rpc::post_json(&self.client, &self.rpc_url, &payload, self.verbose).await?;
         if let Some(error) = body.get("error") {
             let msg = error
                 .get("message")
@@ -140,5 +142,27 @@ impl ChainAdapter for SolanaAdapter {
             ]),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retries_transient_429_before_succeeding() {
+        let addr = crate::rpc::test_support::serve(vec![
+            crate::rpc::test_support::MockResponse::json(429, "{}"),
+            crate::rpc::test_support::MockResponse::json(
+                200,
+                r#"{"jsonrpc":"2.0","id":1,"result":{"value":100}}"#,
+            ),
+        ])
+        .await;
+
+        let adapter =
+            SolanaAdapter::with_rpc(Some(format!("http://{addr}")), Network::Localnet);
+        let result = adapter.call_rpc("getSlot", json!([])).await.unwrap();
+        assert_eq!(result, json!({"value": 100}));
     }
 }

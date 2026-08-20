@@ -10,6 +10,21 @@ pub enum Network {
     Localnet,
 }
 
+impl Network {
+    /// Parse a persisted network name back into a `Network`, accepting the
+    /// same spellings the CLI flag does. Anything unrecognized is `None` so
+    /// callers fall back to the default instead of guessing.
+    pub fn from_config_str(value: &str) -> Option<Network> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "mainnet" => Some(Network::Mainnet),
+            "testnet" => Some(Network::Testnet),
+            "devnet" => Some(Network::Devnet),
+            "localnet" => Some(Network::Localnet),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for Network {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
@@ -56,7 +71,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub rpc_url: Option<String>,
 
-    /// Select the network to use (overrides persisted default)
+    /// Select the network to use (overrides the persisted default). When
+    /// omitted, the last network chosen via `switch --network` is used;
+    /// with no persisted choice this defaults to Mainnet.
     #[arg(short, long, global = true, value_enum)]
     pub network: Option<Network>,
 
@@ -71,13 +88,13 @@ pub enum Commands {
     /// List all supported chains
     Chains,
 
-    /// Switch the default chain and/or default network
+    /// Switch the default chain and/or the persisted default network
     Switch {
         /// Target blockchain to switch to
         chain: Option<String>,
 
         /// Target network to switch to (e.g. mainnet, testnet, devnet, localnet)
-        #[arg(short, long, value_enum)]
+        #[arg(long, value_enum)]
         network: Option<Network>,
     },
 
