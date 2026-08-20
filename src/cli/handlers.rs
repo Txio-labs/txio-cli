@@ -122,8 +122,12 @@ impl CommandHandler {
                         "No".red().bold()
                     }
                 );
-                if let Ok(adapter) =
-                    ChainFactory::get_adapter(&chain, cli.rpc_url.clone(), network.clone())
+                if let Ok(adapter) = ChainFactory::get_adapter(
+                    &chain,
+                    cli.rpc_url.clone(),
+                    network.clone(),
+                    cli.verbose,
+                )
                 {
                     let rpc = cli.rpc_url.as_deref().unwrap_or(adapter.default_rpc());
                     let healthy = adapter.get_gas_price().await.is_ok();
@@ -165,8 +169,12 @@ impl CommandHandler {
                 }
             },
             Commands::Sui { command } => {
-                let adapter =
-                    ChainFactory::get_adapter("sui", cli.rpc_url.clone(), network.clone())?;
+                let adapter = ChainFactory::get_adapter(
+                    "sui",
+                    cli.rpc_url.clone(),
+                    network.clone(),
+                    cli.verbose,
+                )?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Ethereum { command } => {
@@ -174,22 +182,35 @@ impl CommandHandler {
                     "ethereum",
                     cli.rpc_url.clone(),
                     network.clone(),
+                    cli.verbose,
                 )?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Solana { command } => {
-                let adapter =
-                    ChainFactory::get_adapter("solana", cli.rpc_url.clone(), network.clone())?;
+                let adapter = ChainFactory::get_adapter(
+                    "solana",
+                    cli.rpc_url.clone(),
+                    network.clone(),
+                    cli.verbose,
+                )?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Aptos { command } => {
-                let adapter =
-                    ChainFactory::get_adapter("aptos", cli.rpc_url.clone(), network.clone())?;
+                let adapter = ChainFactory::get_adapter(
+                    "aptos",
+                    cli.rpc_url.clone(),
+                    network.clone(),
+                    cli.verbose,
+                )?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Soroban { command } => {
-                let adapter =
-                    ChainFactory::get_adapter("soroban", cli.rpc_url.clone(), network.clone())?;
+                let adapter = ChainFactory::get_adapter(
+                    "soroban",
+                    cli.rpc_url.clone(),
+                    network.clone(),
+                    cli.verbose,
+                )?;
                 Self::handle_chain_command(adapter, command, cli.pretty, cli.verbose).await?;
             }
             Commands::Db { action } => {
