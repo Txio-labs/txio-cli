@@ -16,6 +16,7 @@ const ERC20_TRANSFER_TOPIC: &str =
 pub struct EthereumAdapter {
     client: Client,
     rpc_url: String,
+    verbose: bool,
 }
 
 impl EthereumAdapter {
@@ -38,7 +39,14 @@ impl EthereumAdapter {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             rpc_url: url,
+            verbose: false,
         }
+    }
+
+    /// Enable verbose retry logging for this adapter's RPC calls.
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
     }
 }
 
@@ -60,14 +68,8 @@ impl ChainAdapter for EthereumAdapter {
             "params": params
         });
 
-        let response = self
-            .client
-            .post(&self.rpc_url)
-            .json(&payload)
-            .send()
-            .await?;
-
-        let body: Value = response.json().await?;
+        let body: Value =
+            crate::rpc::post_json(&self.client, &self.rpc_url, &payload, self.verbose).await?;
         if let Some(error) = body.get("error") {
             let msg = error
                 .get("message")
@@ -230,5 +232,22 @@ mod tests {
     fn parse_hex_u64_parses_quantity_strings() {
         assert_eq!(parse_hex_u64("0x10"), 16);
         assert_eq!(parse_hex_u64("0x0"), 0);
+    }
+
+    #[tokio::test]
+    async fn retries_transient_429_before_succeeding() {
+        let addr = crate::rpc::test_support::serve(vec![
+            crate::rpc::test_support::MockResponse::json(429, "{}"),
+            crate::rpc::test_support::MockResponse::json(
+                200,
+                r#"{"jsonrpc":"2.0","id":1,"result":"0x0"}"#,
+            ),
+        ])
+        .await;
+
+        let adapter =
+            EthereumAdapter::with_rpc(Some(format!("http://{addr}")), Network::Localnet);
+        let result = adapter.call_rpc("eth_gasPrice", json!([])).await.unwrap();
+        assert_eq!(result, json!("0x0"));
     }
 }

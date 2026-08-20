@@ -1,13 +1,28 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fmt;
 
-#[derive(Clone, Debug, ValueEnum, Default, PartialEq)]
+#[derive(Clone, Debug, ValueEnum, Default, PartialEq, Eq)]
 pub enum Network {
     #[default]
     Mainnet,
     Testnet,
     Devnet,
     Localnet,
+}
+
+impl Network {
+    /// Parse a persisted network name back into a `Network`, accepting the
+    /// same spellings the CLI flag does. Anything unrecognized is `None` so
+    /// callers fall back to the default instead of guessing.
+    pub fn from_config_str(value: &str) -> Option<Network> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "mainnet" => Some(Network::Mainnet),
+            "testnet" => Some(Network::Testnet),
+            "devnet" => Some(Network::Devnet),
+            "localnet" => Some(Network::Localnet),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Network {
@@ -19,6 +34,20 @@ impl fmt::Display for Network {
             Network::Localnet => "localnet",
         };
         f.write_str(s)
+    }
+}
+
+impl std::str::FromStr for Network {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "mainnet" => Ok(Network::Mainnet),
+            "testnet" => Ok(Network::Testnet),
+            "devnet" => Ok(Network::Devnet),
+            "localnet" => Ok(Network::Localnet),
+            _ => Err(format!("Unknown network: {}", s)),
+        }
     }
 }
 
@@ -42,9 +71,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub rpc_url: Option<String>,
 
-    /// Select the network to use
-    #[arg(short, long, global = true, value_enum, default_value_t = Network::Mainnet)]
-    pub network: Network,
+    /// Select the network to use (overrides the persisted default). When
+    /// omitted, the last network chosen via `switch --network` is used;
+    /// with no persisted choice this defaults to Mainnet.
+    #[arg(short, long, global = true, value_enum)]
+    pub network: Option<Network>,
 
     /// Load environment overrides from an explicit file (opt-in; no upward search).
     /// Without this flag, a `./.env` in the current directory is NOT loaded.
@@ -57,8 +88,15 @@ pub enum Commands {
     /// List all supported chains
     Chains,
 
-    /// Switch the default chain
-    Switch { chain: String },
+    /// Switch the default chain and/or the persisted default network
+    Switch {
+        /// Target blockchain to switch to
+        chain: Option<String>,
+
+        /// Target network to switch to (e.g. mainnet, testnet, devnet, localnet)
+        #[arg(long, value_enum)]
+        network: Option<Network>,
+    },
 
     /// Login to your txio account
     Login,

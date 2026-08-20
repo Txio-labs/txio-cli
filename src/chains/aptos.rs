@@ -9,6 +9,7 @@ use serde_json::Value;
 pub struct AptosAdapter {
     client: Client,
     rpc_url: String,
+    verbose: bool,
 }
 
 impl AptosAdapter {
@@ -31,7 +32,14 @@ impl AptosAdapter {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             rpc_url: url,
+            verbose: false,
         }
+    }
+
+    /// Enable verbose retry logging for this adapter's RPC calls.
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
     }
 }
 
@@ -55,45 +63,42 @@ impl ChainAdapter for AptosAdapter {
             ));
         }
         let url = format!("{}/{}", self.rpc_url, method);
-        let response = self.client.get(&url).send().await?;
-        let body: Value = response.json().await?;
-        Ok(body)
+        crate::rpc::get_json(&self.client, &url, self.verbose).await
     }
 
     async fn get_balance(&self, address: &str) -> Result<Value> {
         let address = validate_aptos_address(address)?;
         let url = build_url(&self.rpc_url, &["accounts", &address, "resources"])?;
-        Ok(self.client.get(url).send().await?.json().await?)
+        crate::rpc::get_json(&self.client, url.as_str(), self.verbose).await
     }
 
     async fn get_transaction(&self, hash: &str) -> Result<Value> {
         let url = build_url(&self.rpc_url, &["transactions", "by_hash", hash])?;
-        let res = self.client.get(url).send().await?;
-        Ok(res.json().await?)
+        crate::rpc::get_json(&self.client, url.as_str(), self.verbose).await
     }
 
     async fn get_block(&self, block: Option<u64>) -> Result<Value> {
         match block {
             Some(height) => {
                 let url = build_url(&self.rpc_url, &["blocks", "by_height", &height.to_string()])?;
-                Ok(self.client.get(url).send().await?.json().await?)
+                crate::rpc::get_json(&self.client, url.as_str(), self.verbose).await
             }
             None => {
                 let url = build_url(&self.rpc_url, &[""])?;
-                Ok(self.client.get(url).send().await?.json().await?)
+                crate::rpc::get_json(&self.client, url.as_str(), self.verbose).await
             }
         }
     }
 
     async fn get_gas_price(&self) -> Result<Value> {
         let url = build_url(&self.rpc_url, &["estimate_gas_price"])?;
-        Ok(self.client.get(url).send().await?.json().await?)
+        crate::rpc::get_json(&self.client, url.as_str(), self.verbose).await
     }
 
     async fn get_account(&self, address: &str) -> Result<Value> {
         let address = validate_aptos_address(address)?;
         let url = build_url(&self.rpc_url, &["accounts", &address])?;
-        Ok(self.client.get(url).send().await?.json().await?)
+        crate::rpc::get_json(&self.client, url.as_str(), self.verbose).await
     }
 
     async fn get_history(&self, address: &str, limit: u32) -> Result<Value> {
@@ -103,6 +108,25 @@ impl ChainAdapter for AptosAdapter {
             &["accounts", &address, "transactions"],
             &[("limit", limit.to_string())],
         )?;
-        Ok(self.client.get(url).send().await?.json().await?)
+        crate::rpc::get_json(&self.client, url.as_str(), self.verbose).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retries_transient_429_before_succeeding() {
+        let addr = crate::rpc::test_support::serve(vec![
+            crate::rpc::test_support::MockResponse::json(429, "{}"),
+            crate::rpc::test_support::MockResponse::json(200, r#"{"height": 1}"#),
+        ])
+        .await;
+
+        let adapter =
+            AptosAdapter::with_rpc(Some(format!("http://{addr}")), Network::Localnet);
+        let result = adapter.call_rpc("blocks", Value::Null).await.unwrap();
+        assert_eq!(result, serde_json::json!({"height": 1}));
     }
 }

@@ -85,10 +85,36 @@ pub fn get_current_chain() -> Result<Option<String>> {
     Ok(fs::read_to_string(path).ok().map(|s| s.trim().to_string()))
 }
 
-pub fn save_token(token: &str) -> Result<()> {
-    let mut path = get_config_dir()?;
-    path.push("token");
+pub fn save_current_network(network: &str) -> Result<()> {
+    write_network_file(&get_config_dir()?, network)
+}
 
+/// Alias for `save_current_network`, matching the naming used elsewhere
+/// (`save_config`/`save_current_chain`) for discoverability.
+pub fn save_network(network: &str) -> Result<()> {
+    save_current_network(network)
+}
+
+pub fn get_current_network() -> Result<Option<String>> {
+    Ok(read_network_file(&get_config_dir()?))
+}
+
+/// Testable core of `save_current_network`: takes the config dir explicitly
+/// so tests don't need to touch the real `HOME`-derived directory.
+pub(crate) fn write_network_file(dir: &Path, network: &str) -> Result<()> {
+    fs::write(dir.join("current_network"), network)?;
+    Ok(())
+}
+
+/// Testable core of `get_current_network`. A missing or unreadable file
+/// (including "a directory sits where the file should be") is just `None`.
+pub(crate) fn read_network_file(dir: &Path) -> Option<String> {
+    fs::read_to_string(dir.join("current_network"))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+fn write_file_secure(path: &Path, contents: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -97,19 +123,25 @@ pub fn save_token(token: &str) -> Result<()> {
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o600)
-            .open(&path)?;
+            .open(path)?;
 
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.set_len(0)?;
-        file.write_all(token.as_bytes())?;
+        file.write_all(contents.as_bytes())?;
     }
     #[cfg(not(unix))]
     {
-        fs::write(&path, token)?;
+        fs::write(path, contents)?;
     }
 
     Ok(())
+}
+
+pub fn save_token(token: &str) -> Result<()> {
+    let mut path = get_config_dir()?;
+    path.push("token");
+    write_file_secure(&path, token)
 }
 
 pub fn get_token() -> Result<Option<String>> {
@@ -140,8 +172,7 @@ pub fn save_config(key: &str, value: &str) -> Result<()> {
         key.to_string(),
         serde_json::Value::String(value.to_string()),
     );
-    fs::write(path, serde_json::to_string_pretty(&map)?)?;
-    Ok(())
+    write_file_secure(&path, &serde_json::to_string_pretty(&map)?)
 }
 
 pub fn get_config(key: &str) -> Result<Option<String>> {
@@ -459,14 +490,131 @@ mod tests {
         unsafe {
             std::env::remove_var("HOME");
         }
-        
+
         let result = get_config_dir();
         assert!(result.is_err(), "get_config_dir should fail when HOME is unset");
         assert!(result.unwrap_err().to_string().contains("Could not determine home directory"));
-        
+
         match old_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+    }
+
+    #[test]
+    fn save_and_get_current_network_round_trip() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("network_persist");
+        let old_home = std::env::var_os("HOME");
+
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        assert_eq!(get_current_network().unwrap(), None);
+
+        save_current_network("testnet").unwrap();
+        assert_eq!(get_current_network().unwrap(), Some("testnet".to_string()));
+
+        save_network("devnet").unwrap();
+        assert_eq!(get_current_network().unwrap(), Some("devnet".to_string()));
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_creates_secure_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("config_mode");
+        let old_home = std::env::var_os("HOME");
+
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        save_config("test_key", "test_val").unwrap();
+
+        let config_dir = temp_home.join(".txio");
+        let config_path = config_dir.join("config.json");
+
+        let file_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "config file must have mode 0o600");
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("test_val"));
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_secures_existing_insecure_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("config_secure_existing");
+        let old_home = std::env::var_os("HOME");
+
+        let config_dir = temp_home.join(".txio");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let config_path = config_dir.join("config.json");
+        fs::write(&config_path, "{}").unwrap();
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let initial_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(initial_mode, 0o644, "test setup: config should start with 0o644");
+
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        save_config("new_key", "new_val").unwrap();
+
+        let final_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(final_mode, 0o600, "save_config must secure existing file to 0o600");
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("new_val"));
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    // ── network persistence ────────────────────────────────────────────────
+
+    #[test]
+    fn network_file_round_trips() {
+        let dir = unique_dir("netround");
+        write_network_file(&dir, "testnet").unwrap();
+        assert_eq!(read_network_file(&dir).as_deref(), Some("testnet"));
+    }
+
+    #[test]
+    fn network_file_is_trimmed_on_read() {
+        let dir = unique_dir("nettrim");
+        write_network_file(&dir, "  devnet \n\n").unwrap();
+        assert_eq!(read_network_file(&dir).as_deref(), Some("devnet"));
+    }
+
+    #[test]
+    fn missing_or_corrupt_network_file_reads_as_none() {
+        let dir = unique_dir("netmissing");
+        assert_eq!(read_network_file(&dir), None);
+        // A directory where the file should be is just as absent to the reader.
+        let nested = dir.join("current_network");
+        fs::create_dir_all(&nested).unwrap();
+        assert_eq!(read_network_file(&dir), None);
     }
 }
