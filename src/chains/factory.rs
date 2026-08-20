@@ -16,13 +16,24 @@ impl ChainFactory {
         chain_name: &str,
         rpc_url: Option<String>,
         network: Network,
+        verbose: bool,
     ) -> Result<Arc<dyn ChainAdapter>> {
         match chain_name.to_lowercase().as_str() {
-            "sui" => Ok(Arc::new(SuiAdapter::with_rpc(rpc_url, network))),
-            "eth" | "ethereum" => Ok(Arc::new(EthereumAdapter::with_rpc(rpc_url, network))),
-            "sol" | "solana" => Ok(Arc::new(SolanaAdapter::with_rpc(rpc_url, network))),
-            "aptos" => Ok(Arc::new(AptosAdapter::with_rpc(rpc_url, network))),
-            "soroban" | "stellar" => Ok(Arc::new(SorobanAdapter::with_rpc(rpc_url, network))),
+            "sui" => Ok(Arc::new(
+                SuiAdapter::with_rpc(rpc_url, network).with_verbose(verbose),
+            )),
+            "eth" | "ethereum" => Ok(Arc::new(
+                EthereumAdapter::with_rpc(rpc_url, network).with_verbose(verbose),
+            )),
+            "sol" | "solana" => Ok(Arc::new(
+                SolanaAdapter::with_rpc(rpc_url, network).with_verbose(verbose),
+            )),
+            "aptos" => Ok(Arc::new(
+                AptosAdapter::with_rpc(rpc_url, network).with_verbose(verbose),
+            )),
+            "soroban" | "stellar" => Ok(Arc::new(
+                SorobanAdapter::with_rpc(rpc_url, network).with_verbose(verbose),
+            )),
             _ => {
                 let suggestion = Self::suggest_chain(chain_name);
                 let mut msg = format!("Unknown chain '{chain_name}'");

@@ -32,6 +32,7 @@ fn is_name_continuation(s: &str, end: usize) -> bool {
 pub struct SuiAdapter {
     client: Client,
     rpc_url: String,
+    verbose: bool,
 }
 
 impl SuiAdapter {
@@ -54,7 +55,14 @@ impl SuiAdapter {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             rpc_url: url,
+            verbose: false,
         }
+    }
+
+    /// Enable verbose retry logging for this adapter's RPC calls.
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
     }
 
     async fn call_rpc_internal(&self, method: &str, params: Value) -> Result<Value> {
@@ -65,14 +73,8 @@ impl SuiAdapter {
             "params": params
         });
 
-        let response = self
-            .client
-            .post(&self.rpc_url)
-            .json(&payload)
-            .send()
-            .await?;
-
-        let body: Value = response.json().await?;
+        let body: Value =
+            crate::rpc::post_json(&self.client, &self.rpc_url, &payload, self.verbose).await?;
         if let Some(error) = body.get("error") {
             let msg = error
                 .get("message")
@@ -427,5 +429,25 @@ mod tests {
             1,
             "duplicate name must resolve exactly once"
         );
+    }
+
+    #[tokio::test]
+    async fn retries_transient_429_before_succeeding() {
+        let addr = crate::rpc::test_support::serve(vec![
+            crate::rpc::test_support::MockResponse::json(429, "{}"),
+            crate::rpc::test_support::MockResponse::json(
+                200,
+                r#"{"jsonrpc":"2.0","id":1,"result":"ok"}"#,
+            ),
+        ])
+        .await;
+
+        let adapter =
+            SuiAdapter::with_rpc(Some(format!("http://{addr}")), Network::Localnet);
+        let result = adapter
+            .call_rpc("suix_getAllBalances", json!(["0x1"]))
+            .await
+            .unwrap();
+        assert_eq!(result, json!("ok"));
     }
 }
