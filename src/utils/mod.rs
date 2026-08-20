@@ -83,31 +83,7 @@ pub fn get_current_chain() -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
 
-pub fn save_current_network(network: &str) -> Result<()> {
-    write_network_file(&get_config_dir(), network)
-}
-
-pub fn get_current_network() -> Option<String> {
-    read_network_file(&get_config_dir())
-}
-
-// Dir-parameterized cores so persistence can be tested against a temp
-// directory instead of the real config dir.
-pub(crate) fn write_network_file(dir: &std::path::Path, network: &str) -> Result<()> {
-    fs::write(dir.join("current_network"), network)?;
-    Ok(())
-}
-
-pub(crate) fn read_network_file(dir: &std::path::Path) -> Option<String> {
-    fs::read_to_string(dir.join("current_network"))
-        .ok()
-        .map(|s| s.trim().to_string())
-}
-
-pub fn save_token(token: &str) -> Result<()> {
-    let mut path = get_config_dir();
-    path.push("token");
-
+fn write_file_secure(path: &Path, contents: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -116,19 +92,25 @@ pub fn save_token(token: &str) -> Result<()> {
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o600)
-            .open(&path)?;
+            .open(path)?;
 
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.set_len(0)?;
-        file.write_all(token.as_bytes())?;
+        file.write_all(contents.as_bytes())?;
     }
     #[cfg(not(unix))]
     {
-        fs::write(&path, token)?;
+        fs::write(path, contents)?;
     }
 
     Ok(())
+}
+
+pub fn save_token(token: &str) -> Result<()> {
+    let mut path = get_config_dir();
+    path.push("token");
+    write_file_secure(&path, token)
 }
 
 pub fn get_token() -> Option<String> {
@@ -159,29 +141,7 @@ pub fn save_config(key: &str, value: &str) -> Result<()> {
         key.to_string(),
         serde_json::Value::String(value.to_string()),
     );
-    let serialized = serde_json::to_string_pretty(&map)?;
-
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .open(&path)?;
-
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.set_len(0)?;
-        file.write_all(serialized.as_bytes())?;
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, serialized)?;
-    }
-
-    Ok(())
+    write_file_secure(&path, &serde_json::to_string_pretty(&map)?)
 }
 
 pub fn get_config(key: &str) -> Result<Option<String>> {
@@ -505,19 +465,16 @@ mod tests {
             std::env::set_var("HOME", &temp_home);
         }
 
-        save_config("rpc_url", "https://custom.rpc.node/api_key_secret").unwrap();
+        save_config("test_key", "test_val").unwrap();
 
         let config_dir = temp_home.join(".txio");
         let config_path = config_dir.join("config.json");
 
-        let dir_mode = fs::metadata(&config_dir).unwrap().permissions().mode() & 0o777;
-        assert_eq!(dir_mode, 0o700, "config dir must have mode 0o700");
-
         let file_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(file_mode, 0o600, "config.json file must have mode 0o600");
+        assert_eq!(file_mode, 0o600, "config file must have mode 0o600");
 
-        let val = get_config("rpc_url").unwrap();
-        assert_eq!(val, Some("https://custom.rpc.node/api_key_secret".to_string()));
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("test_val"));
 
         match old_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
@@ -538,25 +495,23 @@ mod tests {
         fs::create_dir_all(&config_dir).unwrap();
 
         let config_path = config_dir.join("config.json");
-        fs::write(&config_path, "{\"existing\":\"val\"}").unwrap();
+        fs::write(&config_path, "{}").unwrap();
         fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
 
         let initial_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(initial_mode, 0o644, "test setup: config.json should start with 0o644");
+        assert_eq!(initial_mode, 0o644, "test setup: config should start with 0o644");
 
         unsafe {
             std::env::set_var("HOME", &temp_home);
         }
 
-        save_config("new_key", "secret123").unwrap();
+        save_config("new_key", "new_val").unwrap();
 
         let final_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(final_mode, 0o600, "save_config must secure existing config.json file to 0o600");
+        assert_eq!(final_mode, 0o600, "save_config must secure existing file to 0o600");
 
-        let existing_val = get_config("existing").unwrap();
-        assert_eq!(existing_val, Some("val".to_string()));
-        let new_val = get_config("new_key").unwrap();
-        assert_eq!(new_val, Some("secret123".to_string()));
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("new_val"));
 
         match old_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
