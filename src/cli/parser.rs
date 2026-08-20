@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fmt;
 
-#[derive(Clone, Debug, ValueEnum, Default, PartialEq)]
+#[derive(Clone, Debug, ValueEnum, Default, PartialEq, Eq)]
 pub enum Network {
     #[default]
     Mainnet,
@@ -37,6 +37,20 @@ impl fmt::Display for Network {
     }
 }
 
+impl std::str::FromStr for Network {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "mainnet" => Ok(Network::Mainnet),
+            "testnet" => Ok(Network::Testnet),
+            "devnet" => Ok(Network::Devnet),
+            "localnet" => Ok(Network::Localnet),
+            _ => Err(format!("Unknown network: {}", s)),
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "txio")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
@@ -57,9 +71,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub rpc_url: Option<String>,
 
-    /// Select the network to use. When omitted, the last network chosen
-    /// via `switch --network` is used; with no persisted choice this
-    /// defaults to Mainnet.
+    /// Select the network to use (overrides the persisted default). When
+    /// omitted, the last network chosen via `switch --network` is used;
+    /// with no persisted choice this defaults to Mainnet.
     #[arg(short, long, global = true, value_enum)]
     pub network: Option<Network>,
 
@@ -74,12 +88,15 @@ pub enum Commands {
     /// List all supported chains
     Chains,
 
-    /// Switch the default chain
+    /// Switch the default chain and/or the persisted default network
     Switch {
-        /// Also switch the persisted network alongside the chain
+        /// Target blockchain to switch to
+        chain: Option<String>,
+
+        /// Target network to switch to (e.g. mainnet, testnet, devnet, localnet)
         #[arg(long, value_enum)]
         network: Option<Network>,
-        chain: String },
+    },
 
     /// Login to your txio account
     Login,

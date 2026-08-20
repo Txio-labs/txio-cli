@@ -72,24 +72,36 @@ impl CommandHandler {
                     println!("  - {}", chain.green());
                 }
             }
-            Commands::Switch { chain, network: net_flag } => {
-                if ChainFactory::list_chains().contains(&chain.to_lowercase().as_str()) {
-                    utils::save_current_chain(&chain.to_lowercase())?;
-                    if let Some(n) = net_flag {
-                        utils::save_current_network(&n.to_string())?;
-                    }
-                    ui::print_success(&format!(
-                        "Switched default chain to {}",
-                        chain.bold().cyan()
-                    ));
-                } else {
-                    let msg = format!("Unknown chain '{chain}'");
-                    let suggestion = ChainFactory::suggest_chain(&chain);
-                    if let Some(s) = suggestion {
-                        ui::print_error(&format!("{msg} \n\nDid you mean:\n  {}", s.green()));
+            Commands::Switch { chain, network } => {
+                if chain.is_none() && network.is_none() {
+                    ui::print_error("Please specify a chain and/or --network to switch.");
+                    return Ok(());
+                }
+
+                if let Some(chain_name) = chain {
+                    if ChainFactory::list_chains().contains(&chain_name.to_lowercase().as_str()) {
+                        utils::save_current_chain(&chain_name.to_lowercase())?;
+                        ui::print_success(&format!(
+                            "Switched default chain to {}",
+                            chain_name.bold().cyan()
+                        ));
                     } else {
-                        ui::print_error(&msg);
+                        let msg = format!("Unknown chain '{chain_name}'");
+                        let suggestion = ChainFactory::suggest_chain(&chain_name);
+                        if let Some(s) = suggestion {
+                            ui::print_error(&format!("{msg} \n\nDid you mean:\n  {}", s.green()));
+                        } else {
+                            ui::print_error(&msg);
+                        }
                     }
+                }
+
+                if let Some(net) = network {
+                    utils::save_current_network(&net.to_string())?;
+                    ui::print_success(&format!(
+                        "Switched default network to {}",
+                        net.to_string().bold().yellow()
+                    ));
                 }
             }
             Commands::Login => {
@@ -808,5 +820,63 @@ mod tests {
     fn leaves_short_strings_unchanged() {
         let input = "0x2::sui::SUI";
         assert_eq!(truncate_utf8_for_display(input, 10, 10), input);
+    }
+
+    // Integration-level check that save_current_network/get_current_network
+    // (real file I/O under a scratch HOME) feed correctly into resolve_network's
+    // precedence, on top of the pure-logic tests above.
+    #[test]
+    fn resolves_network_with_precedence_end_to_end() {
+        use crate::utils;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        fn unique_dir(tag: &str) -> std::path::PathBuf {
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let mut d = std::env::temp_dir();
+            d.push(format!(
+                "txio_handler_test_{}_{}_{}",
+                tag,
+                std::process::id(),
+                n
+            ));
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("res_net");
+        let old_home = std::env::var_os("HOME");
+
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        // 1. First run, nothing persisted -> Mainnet
+        assert_eq!(
+            resolve_network(None, utils::get_current_network()),
+            Network::Mainnet
+        );
+
+        // 2. Persisted network exists -> picks up persisted network
+        utils::save_current_network("testnet").unwrap();
+        assert_eq!(
+            resolve_network(None, utils::get_current_network()),
+            Network::Testnet
+        );
+
+        // 3. Explicit CLI flag -> overrides persisted network
+        assert_eq!(
+            resolve_network(Some(Network::Devnet), utils::get_current_network()),
+            Network::Devnet
+        );
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
     }
 }

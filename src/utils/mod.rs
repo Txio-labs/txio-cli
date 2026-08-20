@@ -83,6 +83,35 @@ pub fn get_current_chain() -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
 
+pub fn save_current_network(network: &str) -> Result<()> {
+    write_network_file(&get_config_dir(), network)
+}
+
+/// Alias for `save_current_network`, matching the naming used elsewhere
+/// (`save_config`/`save_current_chain`) for discoverability.
+pub fn save_network(network: &str) -> Result<()> {
+    save_current_network(network)
+}
+
+pub fn get_current_network() -> Option<String> {
+    read_network_file(&get_config_dir())
+}
+
+/// Testable core of `save_current_network`: takes the config dir explicitly
+/// so tests don't need to touch the real `HOME`-derived directory.
+pub(crate) fn write_network_file(dir: &Path, network: &str) -> Result<()> {
+    fs::write(dir.join("current_network"), network)?;
+    Ok(())
+}
+
+/// Testable core of `get_current_network`. A missing or unreadable file
+/// (including "a directory sits where the file should be") is just `None`.
+pub(crate) fn read_network_file(dir: &Path) -> Option<String> {
+    fs::read_to_string(dir.join("current_network"))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
 fn write_file_secure(path: &Path, contents: &str) -> Result<()> {
     #[cfg(unix)]
     {
@@ -453,6 +482,30 @@ mod tests {
     }
 
     #[test]
+    fn save_and_get_current_network_round_trip() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let temp_home = unique_dir("network_persist");
+        let old_home = std::env::var_os("HOME");
+
+        unsafe {
+            std::env::set_var("HOME", &temp_home);
+        }
+
+        assert_eq!(get_current_network(), None);
+
+        save_current_network("testnet").unwrap();
+        assert_eq!(get_current_network(), Some("testnet".to_string()));
+
+        save_network("devnet").unwrap();
+        assert_eq!(get_current_network(), Some("devnet".to_string()));
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
     #[cfg(unix)]
     fn save_config_creates_secure_file() {
         use std::os::unix::fs::PermissionsExt;
@@ -531,9 +584,7 @@ mod tests {
     #[test]
     fn network_file_is_trimmed_on_read() {
         let dir = unique_dir("nettrim");
-        write_network_file(&dir, "  devnet 
-
-").unwrap();
+        write_network_file(&dir, "  devnet \n\n").unwrap();
         assert_eq!(read_network_file(&dir).as_deref(), Some("devnet"));
     }
 
