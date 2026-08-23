@@ -16,6 +16,70 @@ use txio_api::dtos::response::AuthResponse;
 
 use dialoguer::{Confirm, Input, Password};
 
+
+/// Parse Ethereum `eth_getBalance` hex quantity into wei.
+pub(crate) fn eth_wei_from_rpc_result(result: &Value) -> Option<u128> {
+    let hex_str = result.as_str()?;
+    let clean = hex_str.trim_start_matches("0x");
+    if clean.is_empty() {
+        return Some(0);
+    }
+    u128::from_str_radix(clean, 16).ok()
+}
+
+/// Parse Solana `getBalance` JSON `{ "value": <lamports u64> }`.
+pub(crate) fn sol_lamports_from_rpc_result(result: &Value) -> Option<u64> {
+    result.get("value").and_then(|v| v.as_u64())
+}
+
+/// Parse Ethereum `eth_gasPrice` hex quantity into wei-per-gas.
+pub(crate) fn eth_gas_price_wei_from_rpc_result(result: &Value) -> Option<u128> {
+    eth_wei_from_rpc_result(result)
+}
+
+/// One Sui coin balance row used for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SuiCoinBalanceRow {
+    pub total_balance: String,
+    pub coin_object_count: u64,
+    pub coin_type: String,
+}
+
+/// Parse Sui `suix_getAllBalances` array payload into rows.
+pub(crate) fn sui_coin_rows_from_rpc_result(result: &Value) -> Option<Vec<SuiCoinBalanceRow>> {
+    let arr = result.as_array()?;
+    let mut rows = Vec::with_capacity(arr.len());
+    for item in arr {
+        rows.push(SuiCoinBalanceRow {
+            total_balance: item
+                .get("totalBalance")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0")
+                .to_string(),
+            coin_object_count: item
+                .get("coinObjectCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            coin_type: item
+                .get("coinType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown")
+                .to_string(),
+        });
+    }
+    Some(rows)
+}
+
+/// Human display for a Sui coin row (SUI uses 9 decimals).
+pub(crate) fn format_sui_coin_balance_display(row: &SuiCoinBalanceRow) -> String {
+    if row.coin_type == "0x2::sui::SUI" {
+        if let Ok(b) = row.total_balance.parse::<u128>() {
+            return format!("{} SUI", format_units_fixed(b, 9, 4));
+        }
+    }
+    row.total_balance.clone()
+}
+
 fn api_base_url() -> String {
     std::env::var("API_URL").unwrap_or_else(|_| "http://localhost:8000".to_string())
 }
@@ -523,8 +587,8 @@ impl CommandHandler {
                 let chain_name = adapter.name();
 
                 if chain_name == "Sui" {
-                    if let Some(arr) = result.as_array() {
-                        if arr.is_empty() {
+                    if let Some(rows) = sui_coin_rows_from_rpc_result(&result) {
+                        if rows.is_empty() {
                             println!("  {} No coins found.", "0".dimmed());
                         } else {
                             println!(
@@ -535,30 +599,9 @@ impl CommandHandler {
                             );
                             println!("{0:-<15}-+-{0:-<10}-+-{0:-<40}", "");
 
-                            for item in arr {
-                                let balance = item
-                                    .get("totalBalance")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("0");
-                                let count = item
-                                    .get("coinObjectCount")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                let coin_type = item
-                                    .get("coinType")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("Unknown");
-
-                                let display_balance = if coin_type == "0x2::sui::SUI" {
-                                    if let Ok(b) = balance.parse::<u128>() {
-                                        format!("{} SUI", format_units_fixed(b, 9, 4))
-                                    } else {
-                                        balance.to_string()
-                                    }
-                                } else {
-                                    balance.to_string()
-                                };
-
+                            for row in rows {
+                                let display_balance = format_sui_coin_balance_display(&row);
+                                let coin_type = row.coin_type.as_str();
                                 let short_coin = if coin_type.len() > 30 {
                                     let parts: Vec<&str> = coin_type.split("::").collect();
                                     if parts.len() >= 3 {
@@ -575,7 +618,7 @@ impl CommandHandler {
                                 println!(
                                     "{0: <15} | {1: <10} | {2}",
                                     display_balance.green().bold(),
-                                    count.to_string().yellow(),
+                                    row.coin_object_count.to_string().yellow(),
                                     short_coin
                                 );
                             }
@@ -585,19 +628,16 @@ impl CommandHandler {
                         Self::print_value(&result, pretty)?;
                     }
                 } else if chain_name == "Ethereum" {
-                    if let Some(hex_str) = result.as_str() {
-                        let clean_hex = hex_str.trim_start_matches("0x");
-                        if let Ok(wei) = u128::from_str_radix(clean_hex, 16) {
-                            let eth = format_units_fixed(wei, 18, 4);
-                            println!("{} {} ETH", "Balance:".bold().cyan(), eth.green().bold());
-                        } else {
-                            println!("{} {}", "Balance (Wei Hex):".bold().cyan(), hex_str.green());
-                        }
+                    if let Some(wei) = eth_wei_from_rpc_result(&result) {
+                        let eth = format_units_fixed(wei, 18, 4);
+                        println!("{} {} ETH", "Balance:".bold().cyan(), eth.green().bold());
+                    } else if let Some(hex_str) = result.as_str() {
+                        println!("{} {}", "Balance (Wei Hex):".bold().cyan(), hex_str.green());
                     } else {
                         Self::print_value(&result, pretty)?;
                     }
                 } else if chain_name == "Solana" {
-                    if let Some(val) = result.get("value").and_then(|v| v.as_u64()) {
+                    if let Some(val) = sol_lamports_from_rpc_result(&result) {
                         let sol = format_units_fixed(val as u128, 9, 4);
                         println!("{} {} SOL", "Balance:".bold().cyan(), sol.green().bold());
                     } else {
@@ -781,7 +821,12 @@ impl CommandHandler {
 mod tests {
     use super::truncate_utf8_for_display;
     use super::resolve_network;
+    use super::{
+        eth_wei_from_rpc_result, format_sui_coin_balance_display, sol_lamports_from_rpc_result,
+        sui_coin_rows_from_rpc_result, SuiCoinBalanceRow,
+    };
     use crate::cli::parser::Network;
+    use serde_json::json;
 
     #[test]
     fn explicit_flag_beats_persisted_and_default() {
@@ -820,6 +865,57 @@ mod tests {
     fn leaves_short_strings_unchanged() {
         let input = "0x2::sui::SUI";
         assert_eq!(truncate_utf8_for_display(input, 10, 10), input);
+    }
+
+
+    #[test]
+    fn eth_wei_from_rpc_parses_hex_quantity() {
+        assert_eq!(
+            eth_wei_from_rpc_result(&json!("0xde0b6b3a7640000")),
+            Some(1_000_000_000_000_000_000u128)
+        );
+        assert_eq!(eth_wei_from_rpc_result(&json!("0x0")), Some(0));
+        assert_eq!(eth_wei_from_rpc_result(&json!("0x")), Some(0));
+        assert_eq!(eth_wei_from_rpc_result(&json!("not-hex")), None);
+        assert_eq!(eth_wei_from_rpc_result(&json!({"value": 1})), None);
+    }
+
+    #[test]
+    fn sol_lamports_from_rpc_parses_value_field() {
+        assert_eq!(
+            sol_lamports_from_rpc_result(&json!({"value": 1_500_000_000u64, "context": {}})),
+            Some(1_500_000_000)
+        );
+        assert_eq!(sol_lamports_from_rpc_result(&json!({"value": "nope"})), None);
+        assert_eq!(sol_lamports_from_rpc_result(&json!("0x1")), None);
+    }
+
+    #[test]
+    fn sui_coin_rows_and_sui_display() {
+        let payload = json!([
+            {
+                "coinType": "0x2::sui::SUI",
+                "coinObjectCount": 2,
+                "totalBalance": "1500000000"
+            },
+            {
+                "coinType": "0xabc::usdc::USDC",
+                "coinObjectCount": 1,
+                "totalBalance": "42"
+            }
+        ]);
+        let rows = sui_coin_rows_from_rpc_result(&payload).expect("array");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].coin_object_count, 2);
+        assert_eq!(format_sui_coin_balance_display(&rows[0]), "1.5000 SUI");
+        assert_eq!(format_sui_coin_balance_display(&rows[1]), "42");
+    }
+
+    #[test]
+    fn eth_balance_display_units_match_prior_precision_fix() {
+        // Guards the same path as CLI ETH balance formatting (18 decimals, 4 places).
+        let wei = eth_wei_from_rpc_result(&json!("0xde0b6b3a7640000")).unwrap();
+        assert_eq!(crate::cli::format::format_units_fixed(wei, 18, 4), "1.0000");
     }
 
     // Integration-level check that save_current_network/get_current_network
