@@ -4,7 +4,7 @@ use crate::cli::format::format_units_fixed;
 use crate::cli::parser::{ChainCommand, Cli, Commands, ConfigAction, DbAction};
 use crate::cli::ui;
 use crate::utils;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use colored::*;
 use serde_json::Value;
 use std::sync::Arc;
@@ -46,20 +46,146 @@ fn truncate_utf8_for_display(input: &str, prefix_len: usize, suffix_len: usize) 
     format!("{prefix}...{suffix}")
 }
 
+// ── Per-chain balance/gas extraction (issue #21) ─────────────────────────
+//
+// These helpers are the pure, directly-testable core of the Balance/Gas
+// match arms in `handle_chain_command`. This exact code area previously
+// shipped a precision bug (commit 66c45f2, issue #24) and sits on a path
+// where malformed RPC bodies already flow (issue #2), so each function is
+// unit-tested against success JSON, empty/missing fields, and error-shaped
+// bodies. They return uncolored strings; the caller owns coloring so the
+// CLI output stays byte-identical to the pre-extraction behavior.
+
+/// One rendered row of the Sui coin table. `short_coin` is the shortened
+/// coin type WITHOUT color codes (the caller re-applies coloring).
+pub struct SuiBalanceRow {
+    pub balance: String,
+    pub object_count: u64,
+    pub coin_type: String,
+    pub short_coin: String,
+}
+
+/// Extracts Sui coin-table rows from a `suix_getBalance`-style response.
+/// `None` when the response is not an array (caller falls back to dumping
+/// the raw JSON). An empty array is `Some(vec![])` — a genuinely empty
+/// wallet is distinct from a missing field.
+pub fn sui_balance_rows(value: &Value) -> Option<Vec<SuiBalanceRow>> {
+    let arr = value.as_array()?;
+    Some(
+        arr.iter()
+            .map(|item| {
+                let balance = item
+                    .get("totalBalance")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0");
+                let count = item
+                    .get("coinObjectCount")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let coin_type = item
+                    .get("coinType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown");
+
+                let display_balance = if coin_type == "0x2::sui::SUI" {
+                    if let Ok(b) = balance.parse::<u128>() {
+                        format!("{} SUI", format_units_fixed(b, 9, 4))
+                    } else {
+                        balance.to_string()
+                    }
+                } else {
+                    balance.to_string()
+                };
+
+                let short_coin = if coin_type.len() > 30 {
+                    let parts: Vec<&str> = coin_type.split("::").collect();
+                    if parts.len() >= 3 {
+                        format!("{}::{}", parts[1], parts[2])
+                    } else {
+                        truncate_utf8_for_display(coin_type, 10, 10)
+                    }
+                } else {
+                    coin_type.to_string()
+                };
+
+                SuiBalanceRow {
+                    balance: display_balance,
+                    object_count: count,
+                    coin_type: coin_type.to_string(),
+                    short_coin,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Parses an Ethereum `eth_getBalance`-style hex wei string.
+pub fn eth_balance_wei(value: &Value) -> Option<u128> {
+    eth_parse_wei_hex(value.as_str()?)
+}
+
+pub fn eth_parse_wei_hex(hex_str: &str) -> Option<u128> {
+    u128::from_str_radix(hex_str.trim_start_matches("0x"), 16).ok()
+}
+
+/// Extracts Solana's lamport figure from `{ "value": <u64> }`.
+pub fn solana_balance_lamports(value: &Value) -> Option<u64> {
+    value.get("value").and_then(|v| v.as_u64())
+}
+
+/// Finds the AptosCoin CoinStore resource in a `0x1::coin::CoinStore` array
+/// response and parses its integer `value`. `None` when the store is absent
+/// or the value is not a valid integer — the caller then dumps the raw JSON
+/// instead of inventing a number.
+pub fn aptos_balance_wei(value: &Value) -> Option<u128> {
+    let arr = value.as_array()?;
+    for resource in arr {
+        if let Some(res_type) = resource.get("type").and_then(|t| t.as_str()) {
+            if res_type == "0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>" {
+                if let Some(val_str) = resource
+                    .get("data")
+                    .and_then(|d| d.get("coin"))
+                    .and_then(|coin| coin.get("value"))
+                    .and_then(|v| v.as_str())
+                {
+                    if let Ok(val) = val_str.parse::<u128>() {
+                        return Some(val);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Sui gas price: accepts a decimal string or a JSON number, defaulting to
+/// zero rather than panicking on unexpected shapes.
+pub fn sui_gas_mist(value: &Value) -> u64 {
+    value
+        .as_str()
+        .and_then(|s| s.parse::<u64>().ok())
+        .or_else(|| value.as_u64())
+        .unwrap_or(0)
+}
+
+/// Ethereum gas price from a hex wei string.
+pub fn eth_gas_wei(value: &Value) -> Option<u128> {
+    eth_parse_wei_hex(value.as_str()?)
+}
+
 pub struct CommandHandler;
 
 /// Decide which network a command runs against: an explicit `--network`
 /// flag always wins, then the last choice persisted by `switch --network`,
 /// and finally the safe Mainnet default. Kept pure so the precedence is
 /// unit-testable without touching the real config directory.
-fn resolve_network(flag: Option<crate::cli::parser::Network>, persisted: Option<String>) -> crate::cli::parser::Network {
+fn resolve_network(
+    flag: Option<crate::cli::parser::Network>,
+    persisted: Option<String>,
+) -> crate::cli::parser::Network {
     use crate::cli::parser::Network;
-    flag.or_else(|| {
-        persisted
-            .as_deref()
-            .and_then(Network::from_config_str)
-    })
-    .unwrap_or_default()
+    flag.or_else(|| persisted.as_deref().and_then(Network::from_config_str))
+        .unwrap_or_default()
 }
 
 impl CommandHandler {
@@ -139,8 +265,7 @@ impl CommandHandler {
                     cli.rpc_url.clone(),
                     network.clone(),
                     cli.verbose,
-                )
-                {
+                ) {
                     let rpc = cli.rpc_url.as_deref().unwrap_or(adapter.default_rpc());
                     let healthy = adapter.get_gas_price().await.is_ok();
                     println!("  {} RPC endpoint:   {}", "»".dimmed(), rpc.dimmed());
@@ -523,115 +648,67 @@ impl CommandHandler {
                 let chain_name = adapter.name();
 
                 if chain_name == "Sui" {
-                    if let Some(arr) = result.as_array() {
-                        if arr.is_empty() {
-                            println!("  {} No coins found.", "0".dimmed());
-                        } else {
-                            println!(
-                                "{0: <15} | {1: <10} | {2}",
-                                "Balance".bold(),
-                                "Objects".bold(),
-                                "Coin Type".bold()
-                            );
-                            println!("{0:-<15}-+-{0:-<10}-+-{0:-<40}", "");
-
-                            for item in arr {
-                                let balance = item
-                                    .get("totalBalance")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("0");
-                                let count = item
-                                    .get("coinObjectCount")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                let coin_type = item
-                                    .get("coinType")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("Unknown");
-
-                                let display_balance = if coin_type == "0x2::sui::SUI" {
-                                    if let Ok(b) = balance.parse::<u128>() {
-                                        format!("{} SUI", format_units_fixed(b, 9, 4))
-                                    } else {
-                                        balance.to_string()
-                                    }
-                                } else {
-                                    balance.to_string()
-                                };
-
-                                let short_coin = if coin_type.len() > 30 {
-                                    let parts: Vec<&str> = coin_type.split("::").collect();
-                                    if parts.len() >= 3 {
-                                        format!("{}::{}", parts[1].blue(), parts[2].cyan())
-                                    } else {
-                                        truncate_utf8_for_display(coin_type, 10, 10)
-                                            .cyan()
-                                            .to_string()
-                                    }
-                                } else {
-                                    coin_type.cyan().to_string()
-                                };
-
+                    match sui_balance_rows(&result) {
+                        None => Self::print_value(&result, pretty)?,
+                        Some(rows) => {
+                            if rows.is_empty() {
+                                println!("  {} No coins found.", "0".dimmed());
+                            } else {
                                 println!(
                                     "{0: <15} | {1: <10} | {2}",
-                                    display_balance.green().bold(),
-                                    count.to_string().yellow(),
-                                    short_coin
+                                    "Balance".bold(),
+                                    "Objects".bold(),
+                                    "Coin Type".bold()
                                 );
+                                println!("{0:-<15}-+-{0:-<10}-+-{0:-<40}", "");
+
+                                for row in rows {
+                                    let display_balance = row.balance.green().bold();
+                                    let short_coin = if row.coin_type.len() > 30 {
+                                        let parts: Vec<&str> = row.coin_type.split("::").collect();
+                                        if parts.len() >= 3 {
+                                            format!("{}::{}", parts[1].blue(), parts[2].cyan())
+                                        } else {
+                                            truncate_utf8_for_display(&row.coin_type, 10, 10)
+                                                .cyan()
+                                                .to_string()
+                                        }
+                                    } else {
+                                        row.coin_type.cyan().to_string()
+                                    };
+
+                                    println!(
+                                        "{0: <15} | {1: <10} | {2}",
+                                        display_balance,
+                                        row.object_count.to_string().yellow(),
+                                        short_coin
+                                    );
+                                }
+                                println!();
                             }
-                            println!();
                         }
-                    } else {
-                        Self::print_value(&result, pretty)?;
                     }
                 } else if chain_name == "Ethereum" {
-                    if let Some(hex_str) = result.as_str() {
-                        let clean_hex = hex_str.trim_start_matches("0x");
-                        if let Ok(wei) = u128::from_str_radix(clean_hex, 16) {
-                            let eth = format_units_fixed(wei, 18, 4);
-                            println!("{} {} ETH", "Balance:".bold().cyan(), eth.green().bold());
-                        } else {
-                            println!("{} {}", "Balance (Wei Hex):".bold().cyan(), hex_str.green());
-                        }
+                    if let Some(wei) = eth_balance_wei(&result) {
+                        let eth = format_units_fixed(wei, 18, 4);
+                        println!("{} {} ETH", "Balance:".bold().cyan(), eth.green().bold());
+                    } else if let Some(hex_str) = result.as_str() {
+                        println!("{} {}", "Balance (Wei Hex):".bold().cyan(), hex_str.green());
                     } else {
                         Self::print_value(&result, pretty)?;
                     }
                 } else if chain_name == "Solana" {
-                    if let Some(val) = result.get("value").and_then(|v| v.as_u64()) {
+                    if let Some(val) = solana_balance_lamports(&result) {
                         let sol = format_units_fixed(val as u128, 9, 4);
                         println!("{} {} SOL", "Balance:".bold().cyan(), sol.green().bold());
                     } else {
                         Self::print_value(&result, pretty)?;
                     }
                 } else if chain_name == "Aptos" {
-                    let mut found = false;
-                    if let Some(arr) = result.as_array() {
-                        for resource in arr {
-                            if let Some(res_type) = resource.get("type").and_then(|t| t.as_str()) {
-                                if res_type == "0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>" {
-                                    if let Some(coin) =
-                                        resource.get("data").and_then(|d| d.get("coin"))
-                                    {
-                                        if let Some(val_str) =
-                                            coin.get("value").and_then(|v| v.as_str())
-                                        {
-                                            if let Ok(val) = val_str.parse::<u128>() {
-                                                let apt = format_units_fixed(val, 8, 4);
-                                                println!(
-                                                    "{} {} APT",
-                                                    "Balance:".bold().cyan(),
-                                                    apt.green().bold()
-                                                );
-                                                found = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if !found {
+                    if let Some(val) = aptos_balance_wei(&result) {
+                        let apt = format_units_fixed(val, 8, 4);
+                        println!("{} {} APT", "Balance:".bold().cyan(), apt.green().bold());
+                    } else {
                         Self::print_value(&result, pretty)?;
                     }
                 } else {
@@ -708,11 +785,7 @@ impl CommandHandler {
                 let chain = adapter.name();
 
                 if chain == "Sui" {
-                    let mist = result
-                        .as_str()
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .or_else(|| result.as_u64())
-                        .unwrap_or(0);
+                    let mist = sui_gas_mist(&result);
                     let sui_gas = format_units_fixed(mist as u128, 9, 9);
                     println!(
                         "{} {} MIST  ({} SUI per gas unit)",
@@ -721,19 +794,14 @@ impl CommandHandler {
                         sui_gas
                     );
                 } else if chain == "Ethereum" {
-                    if let Some(hex) = result.as_str() {
-                        let clean = hex.trim_start_matches("0x");
-                        if let Ok(wei) = u128::from_str_radix(clean, 16) {
-                            let gwei = format_units_fixed(wei, 9, 4);
-                            println!(
-                                "{} {} Gwei  ({} wei)",
-                                "Gas Price:".bold().cyan(),
-                                gwei.green().bold(),
-                                wei.to_string().yellow()
-                            );
-                        } else {
-                            Self::print_value(&result, pretty)?;
-                        }
+                    if let Some(wei) = eth_gas_wei(&result) {
+                        let gwei = format_units_fixed(wei, 9, 4);
+                        println!(
+                            "{} {} Gwei  ({} wei)",
+                            "Gas Price:".bold().cyan(),
+                            gwei.green().bold(),
+                            wei.to_string().yellow()
+                        );
                     } else {
                         Self::print_value(&result, pretty)?;
                     }
@@ -779,9 +847,184 @@ impl CommandHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_utf8_for_display;
     use super::resolve_network;
+    use super::truncate_utf8_for_display;
+    use super::{
+        aptos_balance_wei, eth_balance_wei, eth_gas_wei, solana_balance_lamports, sui_balance_rows,
+        sui_gas_mist,
+    };
     use crate::cli::parser::Network;
+
+    // ── Sui balance rows (#21) ──
+
+    #[test]
+    fn sui_rows_parse_wellformed_success_response() {
+        let body = serde_json::json!([
+            { "totalBalance": "1000000000", "coinObjectCount": 3, "coinType": "0x2::sui::SUI" },
+            { "totalBalance": "5000", "coinObjectCount": 1, "coinType": "0xbb4::xyz::XYZ" }
+        ]);
+        let rows = sui_balance_rows(&body).expect("array body should yield rows");
+        assert_eq!(rows.len(), 2);
+        // Native SUI converts from MIST through exact integer math.
+        assert_eq!(rows[0].balance, "1.0000 SUI");
+        assert_eq!(rows[0].object_count, 3);
+        assert_eq!(rows[0].coin_type, "0x2::sui::SUI");
+        // Non-native coin types keep the raw amount.
+        assert_eq!(rows[1].balance, "5000");
+    }
+
+    #[test]
+    fn sui_rows_empty_array_is_an_empty_wallet_not_missing_data() {
+        let rows = sui_balance_rows(&serde_json::json!([])).expect("array body");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn sui_rows_non_array_body_signals_fallback() {
+        // Error-shaped body (issue #2 class): not an array at all.
+        let body = serde_json::json!({ "detail": "Unhandled error in 'suix_getBalance'" });
+        assert!(sui_balance_rows(&body).is_none());
+    }
+
+    #[test]
+    fn sui_rows_missing_fields_fall_back_without_panic() {
+        let body = serde_json::json!([{}]);
+        let rows = sui_balance_rows(&body).expect("array body");
+        assert_eq!(rows[0].balance, "0");
+        assert_eq!(rows[0].object_count, 0);
+        assert_eq!(rows[0].coin_type, "Unknown");
+    }
+
+    #[test]
+    fn sui_unparseable_native_balance_stays_raw() {
+        let body = serde_json::json!([
+            { "totalBalance": "not-a-number", "coinType": "0x2::sui::SUI" }
+        ]);
+        let rows = sui_balance_rows(&body).expect("array body");
+        assert_eq!(rows[0].balance, "not-a-number");
+    }
+
+    #[test]
+    fn sui_long_coin_type_is_shortened_package_and_module() {
+        let long = "0xaaaa::deeply::nested::module::VeryLongTypeName";
+        let body = serde_json::json!([
+            { "totalBalance": "1", "coinType": long }
+        ]);
+        let rows = sui_balance_rows(&body).expect("array body");
+        assert_eq!(rows[0].short_coin, "deeply::nested");
+    }
+
+    // ── Ethereum balance/gas (#21) ──
+
+    #[test]
+    fn eth_balance_parses_hex_wei() {
+        let body = serde_json::json!("0x1bc16d674ec80000");
+        assert_eq!(eth_balance_wei(&body), Some(2_000_000_000_000_000_000));
+    }
+
+    #[test]
+    fn eth_balance_zero_is_not_missing() {
+        assert_eq!(eth_balance_wei(&serde_json::json!("0x0")), Some(0));
+    }
+
+    #[test]
+    fn eth_balance_invalid_hex_is_none() {
+        assert_eq!(eth_balance_wei(&serde_json::json!("0xzz-not-hex")), None);
+    }
+
+    #[test]
+    fn eth_balance_error_shaped_body_is_none() {
+        let body = serde_json::json!({ "code": -32000, "message": "execution reverted" });
+        assert_eq!(eth_balance_wei(&body), None);
+    }
+
+    #[test]
+    fn eth_gas_wei_mirrors_balance_parsing() {
+        assert_eq!(
+            eth_gas_wei(&serde_json::json!("0x3b9aca00")),
+            Some(1_000_000_000)
+        );
+        assert_eq!(eth_gas_wei(&serde_json::json!("garbage")), None);
+    }
+
+    // ── Solana balance (#21) ──
+
+    #[test]
+    fn solana_balance_reads_value_field() {
+        assert_eq!(
+            solana_balance_lamports(&serde_json::json!({ "value": 4_210_000_000_u64 })),
+            Some(4_210_000_000)
+        );
+    }
+
+    #[test]
+    fn solana_balance_missing_value_is_none() {
+        assert_eq!(solana_balance_lamports(&serde_json::json!({})), None);
+        assert_eq!(
+            solana_balance_lamports(&serde_json::json!({ "value": null })),
+            None
+        );
+    }
+
+    // ── Aptos balance (#21) ──
+
+    #[test]
+    fn aptos_balance_reads_aptos_coin_store() {
+        let body = serde_json::json!([
+            { "type": "0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>",
+              "data": { "coin": { "value": "100000000" } } },
+            { "type": "0x1::coin::CoinStore<0x1::other::Other>", "data": { "coin": { "value": "999" } } }
+        ]);
+        assert_eq!(aptos_balance_wei(&body), Some(100_000_000));
+    }
+
+    #[test]
+    fn aptos_balance_missing_store_is_none() {
+        let body = serde_json::json!([
+            { "type": "0x1::coin::CoinStore<0x1::other::Other>", "data": { "coin": { "value": "999" } } }
+        ]);
+        assert_eq!(aptos_balance_wei(&body), None);
+    }
+
+    #[test]
+    fn aptos_balance_error_shaped_body_is_none() {
+        // Exact shape documented in issue #2: the REST error body flows into
+        // the same code path and must degrade to the raw-JSON fallback.
+        let body = serde_json::json!({ "code": 404, "message": "account not found" });
+        assert_eq!(aptos_balance_wei(&body), None);
+    }
+
+    #[test]
+    fn aptos_balance_unparseable_value_is_none() {
+        let body = serde_json::json!([
+            { "type": "0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>",
+              "data": { "coin": { "value": "12.5 (floats are not valid here)" } } }
+        ]);
+        assert_eq!(aptos_balance_wei(&body), None);
+    }
+
+    // ── Sui gas (#21) ──
+
+    #[test]
+    fn sui_gas_accepts_string_and_number_shapes() {
+        assert_eq!(sui_gas_mist(&serde_json::json!("750")), 750);
+        assert_eq!(sui_gas_mist(&serde_json::json!(750)), 750);
+    }
+
+    #[test]
+    fn sui_gas_defaults_to_zero_on_unexpected_shape() {
+        assert_eq!(sui_gas_mist(&serde_json::json!({})), 0);
+        assert_eq!(sui_gas_mist(&serde_json::json!("soon")), 0);
+    }
+
+    #[test]
+    fn sui_gas_zero_is_distinct_from_missing() {
+        // Both surface as 0 today (pre-existing behavior pinned by this
+        // test); zero balance and unknown shape must not be conflated in
+        // any future change without updating this contract first.
+        assert_eq!(sui_gas_mist(&serde_json::json!("0")), 0);
+        assert_eq!(sui_gas_mist(&serde_json::json!(null)), 0);
+    }
 
     #[test]
     fn explicit_flag_beats_persisted_and_default() {
@@ -828,8 +1071,8 @@ mod tests {
     #[test]
     fn resolves_network_with_precedence_end_to_end() {
         use crate::utils;
-        use std::sync::Mutex;
         use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Mutex;
 
         static ENV_LOCK: Mutex<()> = Mutex::new(());
         static COUNTER: AtomicU64 = AtomicU64::new(0);
