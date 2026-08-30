@@ -80,6 +80,42 @@ pub(crate) fn format_sui_coin_balance_display(row: &SuiCoinBalanceRow) -> String
     row.total_balance.clone()
 }
 
+/// Parse an Aptos account-resources array into the AptosCoin balance (octas).
+pub(crate) fn aptos_balance_octas(result: &Value) -> Option<u128> {
+    let arr = result.as_array()?;
+    for resource in arr {
+        if resource.get("type").and_then(|t| t.as_str())
+            == Some("0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>")
+        {
+            return resource
+                .get("data")
+                .and_then(|d| d.get("coin"))
+                .and_then(|c| c.get("value"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u128>().ok());
+        }
+    }
+    None
+}
+
+/// Parse a Sui reference gas price (string or number) into MIST.
+pub(crate) fn sui_gas_mist(result: &Value) -> Option<u64> {
+    result
+        .as_str()
+        .and_then(|s| s.parse::<u64>().ok())
+        .or_else(|| result.as_u64())
+}
+
+/// Parse an Ethereum `eth_gasPrice` hex (with or without `0x`) into wei.
+pub(crate) fn ethereum_gas_wei(result: &Value) -> Option<u128> {
+    let hex = result.as_str()?;
+    let clean = hex.trim_start_matches("0x");
+    if clean.is_empty() {
+        return Some(0);
+    }
+    u128::from_str_radix(clean, 16).ok()
+}
+
 fn api_base_url() -> String {
     std::env::var("API_URL").unwrap_or_else(|_| "http://localhost:8000".to_string())
 }
@@ -644,34 +680,14 @@ impl CommandHandler {
                         Self::print_value(&result, pretty)?;
                     }
                 } else if chain_name == "Aptos" {
-                    let mut found = false;
-                    if let Some(arr) = result.as_array() {
-                        for resource in arr {
-                            if let Some(res_type) = resource.get("type").and_then(|t| t.as_str()) {
-                                if res_type == "0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>" {
-                                    if let Some(coin) =
-                                        resource.get("data").and_then(|d| d.get("coin"))
-                                    {
-                                        if let Some(val_str) =
-                                            coin.get("value").and_then(|v| v.as_str())
-                                        {
-                                            if let Ok(val) = val_str.parse::<u128>() {
-                                                let apt = format_units_fixed(val, 8, 4);
-                                                println!(
-                                                    "{} {} APT",
-                                                    "Balance:".bold().cyan(),
-                                                    apt.green().bold()
-                                                );
-                                                found = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if !found {
+                    if let Some(val) = aptos_balance_octas(&result) {
+                        let apt = format_units_fixed(val, 8, 4);
+                        println!(
+                            "{} {} APT",
+                            "Balance:".bold().cyan(),
+                            apt.green().bold()
+                        );
+                    } else {
                         Self::print_value(&result, pretty)?;
                     }
                 } else {
@@ -748,11 +764,7 @@ impl CommandHandler {
                 let chain = adapter.name();
 
                 if chain == "Sui" {
-                    let mist = result
-                        .as_str()
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .or_else(|| result.as_u64())
-                        .unwrap_or(0);
+                    let mist = sui_gas_mist(&result).unwrap_or(0);
                     let sui_gas = format_units_fixed(mist as u128, 9, 9);
                     println!(
                         "{} {} MIST  ({} SUI per gas unit)",
@@ -761,19 +773,14 @@ impl CommandHandler {
                         sui_gas
                     );
                 } else if chain == "Ethereum" {
-                    if let Some(hex) = result.as_str() {
-                        let clean = hex.trim_start_matches("0x");
-                        if let Ok(wei) = u128::from_str_radix(clean, 16) {
-                            let gwei = format_units_fixed(wei, 9, 4);
-                            println!(
-                                "{} {} Gwei  ({} wei)",
-                                "Gas Price:".bold().cyan(),
-                                gwei.green().bold(),
-                                wei.to_string().yellow()
-                            );
-                        } else {
-                            Self::print_value(&result, pretty)?;
-                        }
+                    if let Some(wei) = ethereum_gas_wei(&result) {
+                        let gwei = format_units_fixed(wei, 9, 4);
+                        println!(
+                            "{} {} Gwei  ({} wei)",
+                            "Gas Price:".bold().cyan(),
+                            gwei.green().bold(),
+                            wei.to_string().yellow()
+                        );
                     } else {
                         Self::print_value(&result, pretty)?;
                     }
@@ -822,8 +829,9 @@ mod tests {
     use super::truncate_utf8_for_display;
     use super::resolve_network;
     use super::{
-        eth_wei_from_rpc_result, format_sui_coin_balance_display, sol_lamports_from_rpc_result,
-        sui_coin_rows_from_rpc_result, SuiCoinBalanceRow,
+        aptos_balance_octas, eth_wei_from_rpc_result, ethereum_gas_wei,
+        format_sui_coin_balance_display, sol_lamports_from_rpc_result,
+        sui_coin_rows_from_rpc_result, sui_gas_mist, SuiCoinBalanceRow,
     };
     use crate::cli::parser::Network;
     use serde_json::json;
@@ -974,5 +982,60 @@ mod tests {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+    }
+
+    #[test]
+    fn aptos_balance_octas_parses_coin_store() {
+        let value = json!([
+            {"type":"0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>","data":{"coin":{"value":"100000000"}}}
+        ]);
+        assert_eq!(aptos_balance_octas(&value), Some(100_000_000u128));
+    }
+
+    #[test]
+    fn aptos_balance_octas_returns_none_when_missing() {
+        assert!(aptos_balance_octas(&json!([{"type":"other"}])).is_none());
+        assert!(aptos_balance_octas(&json!("not array")).is_none());
+    }
+
+    #[test]
+    fn aptos_balance_octas_handles_malformed_gracefully() {
+        let value = json!([{"type":"0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>","data":{"coin":{"value":"invalid"}}}]);
+        assert_eq!(aptos_balance_octas(&value), None);
+    }
+
+    #[test]
+    fn sui_gas_mist_parses_string_and_number() {
+        assert_eq!(sui_gas_mist(&json!("1000000000")), Some(1_000_000_000u64));
+        assert_eq!(
+            sui_gas_mist(&json!(1_000_000_000u64)),
+            Some(1_000_000_000u64)
+        );
+        assert_eq!(sui_gas_mist(&json!("0")), Some(0u64));
+    }
+
+    #[test]
+    fn sui_gas_mist_returns_none_for_invalid() {
+        assert!(sui_gas_mist(&json!("not a number")).is_none());
+        assert!(sui_gas_mist(&json!({})).is_none());
+    }
+
+    #[test]
+    fn ethereum_gas_wei_parses_hex() {
+        assert_eq!(
+            ethereum_gas_wei(&json!("0x3b9aca00")),
+            Some(1_000_000_000u128)
+        );
+        assert_eq!(
+            ethereum_gas_wei(&json!("3b9aca00")),
+            Some(1_000_000_000u128)
+        );
+        assert_eq!(ethereum_gas_wei(&json!("0x")), Some(0u128));
+    }
+
+    #[test]
+    fn ethereum_gas_wei_returns_none_for_invalid() {
+        assert!(ethereum_gas_wei(&json!("not hex")).is_none());
+        assert!(ethereum_gas_wei(&json!(123u64)).is_none());
     }
 }
