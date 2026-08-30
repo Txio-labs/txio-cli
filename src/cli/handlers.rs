@@ -919,6 +919,62 @@ mod tests {
         assert_eq!(format_sui_coin_balance_display(&rows[1]), "42");
     }
 
+    // Edge cases ported from #24 that the coverage above doesn't reach.
+
+    #[test]
+    fn sui_coin_rows_empty_array_is_an_empty_wallet_not_missing_data() {
+        let rows = sui_coin_rows_from_rpc_result(&json!([])).expect("array body");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn sui_coin_rows_non_array_body_signals_fallback() {
+        // Error-shaped body (issue #2 class): not an array at all.
+        let body = json!({ "detail": "Unhandled error in 'suix_getBalance'" });
+        assert!(sui_coin_rows_from_rpc_result(&body).is_none());
+    }
+
+    #[test]
+    fn sui_coin_rows_missing_fields_fall_back_without_panic() {
+        let rows = sui_coin_rows_from_rpc_result(&json!([{}])).expect("array body");
+        assert_eq!(rows[0].total_balance, "0");
+        assert_eq!(rows[0].coin_object_count, 0);
+        assert_eq!(rows[0].coin_type, "Unknown");
+    }
+
+    #[test]
+    fn sui_coin_display_unparseable_native_balance_stays_raw() {
+        let payload = json!([
+            { "totalBalance": "not-a-number", "coinType": "0x2::sui::SUI" }
+        ]);
+        let rows = sui_coin_rows_from_rpc_result(&payload).expect("array");
+        assert_eq!(format_sui_coin_balance_display(&rows[0]), "not-a-number");
+    }
+
+    #[test]
+    fn aptos_balance_octas_missing_store_is_none() {
+        let body = json!([
+            { "type": "0x1::coin::CoinStore<0x1::other::Other>", "data": { "coin": { "value": "999" } } }
+        ]);
+        assert_eq!(aptos_balance_octas(&body), None);
+    }
+
+    #[test]
+    fn aptos_balance_octas_error_shaped_body_is_none() {
+        // Exact shape documented in issue #2: the REST error body flows into
+        // the same code path and must degrade to the raw-JSON fallback.
+        let body = json!({ "code": 404, "message": "account not found" });
+        assert_eq!(aptos_balance_octas(&body), None);
+    }
+
+    #[test]
+    fn sui_gas_mist_zero_is_distinct_from_missing() {
+        // Zero balance and unknown shape must not be conflated: 0 parses to
+        // Some(0), an unrecognized shape parses to None.
+        assert_eq!(sui_gas_mist(&json!("0")), Some(0));
+        assert_eq!(sui_gas_mist(&json!(null)), None);
+    }
+
     #[test]
     fn eth_balance_display_units_match_prior_precision_fix() {
         // Guards the same path as CLI ETH balance formatting (18 decimals, 4 places).
