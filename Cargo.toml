@@ -1,29 +1,35 @@
 [package]
 name = "txio"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
-description.workspace = true
-repository.workspace = true
-homepage.workspace = true
+version = "0.1.2"
+edition = "2021"
+authors = ["Victor Oladimeji"]
+license = "MIT"
+description = "One terminal. Every chain."
+repository = "https://github.com/Txio-labs/txio-cli"
+homepage = "https://github.com/Txio-labs/txio-cli"
 
 [dependencies]
-txio-api = { path = "../backend/api", version = "0.1.2" }
-clap = { workspace = true }
-tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-reqwest = { workspace = true }
-anyhow = { workspace = true }
-async-trait = { workspace = true }
-regex = { workspace = true }
-dotenvy = { workspace = true }
-strsim = { workspace = true }
-clap_complete = { workspace = true }
-colored = { workspace = true }
-indicatif = { workspace = true }
-dirs-next = { workspace = true }
-dialoguer = { workspace = true }
-bs58 = { workspace = true }
+# A path dependency, not a registry one: this crate is built directly
+# against txio-backend's current api/ source (see README for the expected
+# checkout layout), not against whatever's last published to crates.io.
+# No `version` requirement here on purpose -- that field is still checked
+# against the local crate's own declared version even for a path
+# dependency, which broke every build as soon as the two diverged.
+txio-api = { path = "../txio-backend/api" }
+clap = { version = "4.6", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.11", features = ["json"] }
+anyhow = "1"
+async-trait = "0.1"
+regex = "1"
+dotenvy = "0.15"
+strsim = "0.11"
+clap_complete = "4.6"
+colored = "2.2"
+indicatif = "0.17"
+dirs-next = "2.0"
+dialoguer = "0.11"
+bs58 = "0.5"
 stellar-strkey = "0.0.8"

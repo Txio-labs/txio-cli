@@ -8,9 +8,7 @@ use anyhow::{Result, anyhow};
 use colored::*;
 use serde_json::Value;
 use std::sync::Arc;
-use txio_api::dtos::admin_dtos::{
-    AdminLogEntry, AdminStatsResponse, AdminUsersResponse, RpcLogRequest,
-};
+use txio_api::dtos::admin_dtos::{AdminLogEntry, AdminStatsResponse, AdminUsersResponse};
 use txio_api::dtos::request::LoginRequest;
 use txio_api::dtos::response::AuthResponse;
 
@@ -569,25 +567,6 @@ impl CommandHandler {
                 );
 
                 let result = adapter.call_rpc(&method, params_val.clone()).await;
-
-                // Best-effort audit log: the backend verifies the token and
-                // attributes the log to the authenticated user itself, so a
-                // failure here (offline, logged out, server unreachable)
-                // must never block returning the RPC result to the user.
-                if let Some(token) = utils::get_token()? {
-                    let log_request = RpcLogRequest {
-                        method: method.clone(),
-                        params: params_val,
-                        success: result.is_ok(),
-                        error: result.as_ref().err().map(|e| e.to_string()),
-                    };
-                    let _ = http_client()
-                        .post(format!("{}/api/v1/auth/rpc-log", api_base_url()))
-                        .bearer_auth(&token)
-                        .json(&log_request)
-                        .send()
-                        .await;
-                }
 
                 let response = result?;
                 Self::print_value(&response, pretty)?;
