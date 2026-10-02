@@ -143,3 +143,7 @@ suggestions, and the PR process. Please also read our
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+
+## Cross-Platform & Build Support
+This project supports Linux, macOS, and Windows environments with automated toolchains.
