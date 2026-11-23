@@ -125,6 +125,13 @@ fn http_client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
+fn is_sui_coin_type(coin_type: &str) -> bool {
+    coin_type
+        .strip_suffix("::sui::SUI")
+        .and_then(|addr| addr.strip_prefix("0x"))
+        .is_some_and(|hex| hex.trim_start_matches('0') == "2")
+}
+
 fn truncate_utf8_for_display(input: &str, prefix_len: usize, suffix_len: usize) -> String {
     let char_count = input.chars().count();
     if char_count <= prefix_len + suffix_len {
@@ -559,38 +566,35 @@ impl CommandHandler {
                     eprintln!("[verbose] method: {method} | params: {params_val}");
                 }
 
-                println!(
+                // Status goes to stderr so stdout carries only the answer.
+                eprintln!(
                     "{} Calling {} on {}...",
                     "🚀".bold(),
                     method.cyan(),
                     adapter.name().green()
                 );
 
-                let result = adapter.call_rpc(&method, params_val.clone()).await;
-
-                let response = result?;
-                Self::print_value(&response, pretty)?;
+                let response = adapter.call_rpc(&method, params_val).await?;
+                match Self::balance_lines(adapter.name(), &method, &response) {
+                    Some(lines) => lines.iter().for_each(|line| println!("{line}")),
+                    None => Self::print_result(&response, pretty)?,
+                }
             }
             ChainCommand::Balance { address } => {
-                println!(
-                    "{} Fetching balance for {} on {}...\n",
+                eprintln!(
+                    "{} Fetching balance for {} on {}...",
                     "💰".bold(),
                     address.dimmed(),
                     adapter.name().green()
                 );
 
                 let resolved_address = if let Some(addr) = adapter.resolve_name(&address).await? {
-                    println!(
-                        "{} Resolved {} to {}\n",
-                        "🔍".blue(),
-                        address.yellow(),
-                        addr.cyan()
-                    );
+                    eprintln!("{} Resolved {} to {}", "🔍".blue(), address.yellow(), addr.cyan());
                     addr
                 } else {
                     if address.ends_with(".sui") || address.ends_with(".eth") {
-                        println!(
-                            "{} {} could not be resolved! Proceeding with raw input...\n",
+                        eprintln!(
+                            "{} {} could not be resolved! Proceeding with raw input...",
                             "⚠️".yellow(),
                             address.yellow()
                         );
@@ -599,104 +603,35 @@ impl CommandHandler {
                 };
 
                 let result = adapter.get_balance(&resolved_address).await?;
-                let chain_name = adapter.name();
-
-                if chain_name == "Sui" {
-                    if let Some(rows) = sui_coin_rows_from_rpc_result(&result) {
-                        if rows.is_empty() {
-                            println!("  {} No coins found.", "0".dimmed());
-                        } else {
-                            println!(
-                                "{0: <15} | {1: <10} | {2}",
-                                "Balance".bold(),
-                                "Objects".bold(),
-                                "Coin Type".bold()
-                            );
-                            println!("{0:-<15}-+-{0:-<10}-+-{0:-<40}", "");
-
-                            for row in rows {
-                                let display_balance = format_sui_coin_balance_display(&row);
-                                let coin_type = row.coin_type.as_str();
-                                let short_coin = if coin_type.len() > 30 {
-                                    let parts: Vec<&str> = coin_type.split("::").collect();
-                                    if parts.len() >= 3 {
-                                        format!("{}::{}", parts[1].blue(), parts[2].cyan())
-                                    } else {
-                                        truncate_utf8_for_display(coin_type, 10, 10)
-                                            .cyan()
-                                            .to_string()
-                                    }
-                                } else {
-                                    coin_type.cyan().to_string()
-                                };
-
-                                println!(
-                                    "{0: <15} | {1: <10} | {2}",
-                                    display_balance.green().bold(),
-                                    row.coin_object_count.to_string().yellow(),
-                                    short_coin
-                                );
-                            }
-                            println!();
-                        }
-                    } else {
-                        Self::print_value(&result, pretty)?;
-                    }
-                } else if chain_name == "Ethereum" {
-                    if let Some(wei) = eth_wei_from_rpc_result(&result) {
-                        let eth = format_units_fixed(wei, 18, 4);
-                        println!("{} {} ETH", "Balance:".bold().cyan(), eth.green().bold());
-                    } else if let Some(hex_str) = result.as_str() {
-                        println!("{} {}", "Balance (Wei Hex):".bold().cyan(), hex_str.green());
-                    } else {
-                        Self::print_value(&result, pretty)?;
-                    }
-                } else if chain_name == "Solana" {
-                    if let Some(val) = sol_lamports_from_rpc_result(&result) {
-                        let sol = format_units_fixed(val as u128, 9, 4);
-                        println!("{} {} SOL", "Balance:".bold().cyan(), sol.green().bold());
-                    } else {
-                        Self::print_value(&result, pretty)?;
-                    }
-                } else if chain_name == "Aptos" {
-                    if let Some(val) = aptos_balance_octas(&result) {
-                        let apt = format_units_fixed(val, 8, 4);
-                        println!(
-                            "{} {} APT",
-                            "Balance:".bold().cyan(),
-                            apt.green().bold()
-                        );
-                    } else {
-                        Self::print_value(&result, pretty)?;
-                    }
-                } else {
-                    Self::print_value(&result, pretty)?;
+                match Self::balance_lines(adapter.name(), "", &result) {
+                    Some(lines) => lines.iter().for_each(|line| println!("{line}")),
+                    None => Self::print_result(&result, pretty)?,
                 }
             }
             ChainCommand::Tx { hash } => {
-                println!(
+                eprintln!(
                     "{} Fetching transaction {} on {}...\n",
                     "🔎".bold(),
                     hash.dimmed(),
                     adapter.name().green()
                 );
                 let result = adapter.get_transaction(&hash).await?;
-                Self::print_value(&result, pretty)?;
+                Self::print_result(&result, pretty)?;
             }
             ChainCommand::Object { id } => {
-                println!(
+                eprintln!(
                     "{} Inspecting {} on {}...\n",
                     "🔎".bold(),
                     id.dimmed(),
                     adapter.name().green()
                 );
                 let result = adapter.get_account(&id).await?;
-                Self::print_value(&result, pretty)?;
+                Self::print_result(&result, pretty)?;
             }
             ChainCommand::History { address, limit } => {
                 let chain = adapter.name();
                 if chain == "Ethereum" {
-                    println!(
+                    eprintln!(
                         "{} Fetching up to {} recent ERC-20 transfer logs for {} on {}...\n",
                         "📜".bold(),
                         limit,
@@ -704,7 +639,7 @@ impl CommandHandler {
                         chain.green()
                     );
                 } else {
-                    println!(
+                    eprintln!(
                         "{} Fetching {} recent transactions for {} on {}...\n",
                         "📜".bold(),
                         limit,
@@ -731,10 +666,10 @@ impl CommandHandler {
                     address
                 };
                 let result = adapter.get_history(&resolved_address, limit).await?;
-                Self::print_value(&result, pretty)?;
+                Self::print_result(&result, pretty)?;
             }
             ChainCommand::Gas => {
-                println!(
+                eprintln!(
                     "{} Fetching gas price on {}...\n",
                     "⛽".bold(),
                     adapter.name().green()
@@ -761,28 +696,28 @@ impl CommandHandler {
                             wei.to_string().yellow()
                         );
                     } else {
-                        Self::print_value(&result, pretty)?;
+                        Self::print_result(&result, pretty)?;
                     }
                 } else {
-                    Self::print_value(&result, pretty)?;
+                    Self::print_result(&result, pretty)?;
                 }
             }
             ChainCommand::Block { number } => {
                 match number {
-                    Some(n) => println!(
+                    Some(n) => eprintln!(
                         "{} Fetching block #{} on {}...\n",
                         "📦".bold(),
                         n,
                         adapter.name().green()
                     ),
-                    None => println!(
+                    None => eprintln!(
                         "{} Fetching latest block on {}...\n",
                         "📦".bold(),
                         adapter.name().green()
                     ),
                 }
                 let result = adapter.get_block(number).await?;
-                Self::print_value(&result, pretty)?;
+                Self::print_result(&result, pretty)?;
             }
         }
 
@@ -801,10 +736,156 @@ impl CommandHandler {
         }
         Ok(())
     }
+
+    /// Prints an RPC result without JSON wrapping for scalars (a string is
+    /// printed as-is, not quoted); containers still print as JSON.
+    fn print_result(value: &Value, pretty: bool) -> Result<()> {
+        match value {
+            Value::String(s) => println!("{s}"),
+            Value::Null | Value::Bool(_) | Value::Number(_) => println!("{value}"),
+            _ => Self::print_value(value, pretty)?,
+        }
+        Ok(())
+    }
+
+    /// Parses a decimal amount string (e.g. "0.9580461") into base units with
+    /// `decimals` fractional digits. None if it has more fractional digits than that.
+    fn parse_decimal_units(s: &str, decimals: u32) -> Option<u128> {
+        let (whole, frac) = s.split_once('.').unwrap_or((s, ""));
+        if frac.len() > decimals as usize {
+            return None;
+        }
+        let whole = if whole.is_empty() { "0" } else { whole };
+        let padded = format!("{frac:0<width$}", width = decimals as usize);
+        format!("{whole}{padded}").parse::<u128>().ok()
+    }
+
+    /// The human-readable balance lines for a balance result, or `None` when
+    /// the call is not a balance query for this chain or the result is not in
+
+    /// a shape we know. `method` is empty for the `balance` subcommand.
+    fn balance_lines(chain: &str, method: &str, value: &Value) -> Option<Vec<String>> {
+        let is_balance_call = match chain {
+            "Sui" => matches!(method, "" | "suix_getAllBalances" | "suix_getBalance"),
+            "Ethereum" => matches!(method, "" | "eth_getBalance"),
+            "Solana" => matches!(method, "" | "getBalance"),
+            "Soroban" => matches!(method, "" | "getBalance"),
+            _ => method.is_empty(),
+        };
+        if !is_balance_call {
+            return None;
+        }
+
+        match chain {
+            "Sui" => {
+                let entries: Vec<&Value> = match value {
+                    Value::Array(arr) => arr.iter().collect(),
+                    Value::Object(_) => vec![value],
+                    _ => return None,
+                };
+                if entries.is_empty() {
+                    return Some(vec!["0 SUI".to_string()]);
+                }
+                Some(
+                    entries
+                        .into_iter()
+                        .map(|item| {
+                            let total = item.get("totalBalance").and_then(|v| v.as_str()).unwrap_or("0");
+                            let coin_type = item.get("coinType").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                            if is_sui_coin_type(coin_type) {
+                                match total.parse::<u128>() {
+                                    Ok(b) => format!("{} SUI", format_units_fixed(b, 9, 4)),
+                                    Err(_) => format!("{total} SUI"),
+                                }
+                            } else {
+                                format!("{total} {coin_type}")
+                            }
+                        })
+                        .collect(),
+                )
+            }
+            "Ethereum" => {
+                let hex = value.as_str()?;
+                let wei = u128::from_str_radix(hex.trim_start_matches("0x"), 16).ok()?;
+                Some(vec![format!("{} ETH", format_units_fixed(wei, 18, 4))])
+            }
+            "Solana" => {
+                let lamports = value.get("value").and_then(|v| v.as_u64())?;
+                Some(vec![format!("{} SOL", format_units_fixed(lamports as u128, 9, 4))])
+            }
+            "Aptos" => {
+                let octas = value.as_array()?.iter().find_map(|resource| {
+                    if resource.get("type").and_then(|t| t.as_str())
+                        != Some("0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>")
+                    {
+                        return None;
+                    }
+                    resource.get("data")?.get("coin")?.get("value")?.as_str()?.parse::<u128>().ok()
+                })?;
+                Some(vec![format!("{} APT", format_units_fixed(octas, 8, 4))])
+            }
+            "Starknet" => {
+                let amount = value.get("balance")?.as_str()?;
+                let token = value.get("token")?.as_str()?;
+                Some(vec![format!("{amount} {token}")])
+            }
+            "Soroban" => {
+                // Horizon account: one line per asset; amounts are 7-decimal strings.
+                let lines: Vec<String> = value
+                    .get("balances")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|b| {
+                        let base = Self::parse_decimal_units(b.get("balance")?.as_str()?, 7)?;
+                        let code = if b.get("asset_type")?.as_str()? == "native" {
+                            "XLM".to_string()
+                        } else {
+                            b.get("asset_code")?.as_str()?.to_string()
+                        };
+                        Some(format!("{} {code}", format_units_fixed(base, 7, 4)))
+                    })
+                    .collect();
+                if lines.is_empty() { None } else { Some(lines) }
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn balance_lines_shape_per_chain() {
+        use super::CommandHandler;
+        use serde_json::json;
+
+        // Sui: SUI formatted to 4 places, other coin types left raw.
+        let sui = json!([
+            {"coinType": "0x2::sui::SUI", "totalBalance": "1234500000"},
+            {"coinType": "0xdba3::usdc::USDC", "totalBalance": "42"}
+        ]);
+        assert_eq!(
+            CommandHandler::balance_lines("Sui", "", &sui).unwrap(),
+            vec!["1.2345 SUI".to_string(), "42 0xdba3::usdc::USDC".to_string()]
+        );
+
+        // Ethereum eth_getBalance hex -> ETH.
+        assert_eq!(
+            CommandHandler::balance_lines("Ethereum", "eth_getBalance", &json!("0xde0b6b3a7640000")).unwrap(),
+            vec!["1.0000 ETH".to_string()]
+        );
+
+        // Solana getBalance {value} lamports -> SOL.
+        assert_eq!(
+            CommandHandler::balance_lines("Solana", "getBalance", &json!({"context": {}, "value": 1500000000u64})).unwrap(),
+            vec!["1.5000 SOL".to_string()]
+        );
+
+        // Non-balance methods are not reshaped.
+        assert!(CommandHandler::balance_lines("Ethereum", "eth_blockNumber", &json!("0x10")).is_none());
+        assert!(CommandHandler::balance_lines("Sui", "suix_getCoins", &json!([])).is_none());
+    }
+
     use super::truncate_utf8_for_display;
     use super::resolve_network;
     use super::{
