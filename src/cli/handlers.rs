@@ -666,7 +666,10 @@ impl CommandHandler {
                     address
                 };
                 let result = adapter.get_history(&resolved_address, limit).await?;
-                Self::print_result(&result, pretty)?;
+                match (pretty, crate::cli::history::history_lines(adapter.name(), &result)) {
+                    (false, Some(lines)) => lines.iter().for_each(|line| println!("{line}")),
+                    _ => Self::print_value(&result, pretty)?,
+                }
             }
             ChainCommand::Gas => {
                 eprintln!(
